@@ -1,0 +1,16 @@
+{
+  "name": "fanbox",
+  "version": "1.0.0",
+  "description": "翻箱 FanBox — 为 vibe coding 而生的本地文件指挥中心。在浏览器里查看、搜索、预览、一键打开本机所有文件夹和文件。",
+  "bin": {
+    "fanbox": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}

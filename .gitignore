@@ -1,0 +1,13 @@
+# 依赖与构建产物
+node_modules/
+dist/
+build/
+
+# 系统与编辑器
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# 本地运行时（翻箱的收藏/最近记录存在用户主目录，不入库）
+.fanbox/

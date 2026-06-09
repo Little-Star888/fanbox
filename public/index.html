@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>翻箱 FanBox — 本地文件指挥中心</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+</head>
+<body>
+  <div id="app">
+    <!-- 侧边栏 -->
+    <aside id="sidebar">
+      <div class="brand">
+        <span class="logo"><svg width="28" height="28" viewBox="0 0 24 24" fill="currentColor" fill-opacity="0.13" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.3 7 12 12 20.7 7"/><line x1="12" y1="22" x2="12" y2="12"/></svg></span>
+        <div>
+          <div class="brand-name">翻箱</div>
+          <div class="brand-sub">FanBox</div>
+        </div>
+      </div>
+
+      <button id="cmdk-trigger" class="cmdk-trigger">
+        <span class="ct-label"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg> 搜索全部文件</span>
+        <kbd>⌘K</kbd>
+      </button>
+
+      <nav class="nav-section">
+        <div class="nav-title">快速入口</div>
+        <ul id="roots-list" class="nav-list"></ul>
+      </nav>
+
+      <nav class="nav-section">
+        <div class="nav-title"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg> 收藏</div>
+        <ul id="favs-list" class="nav-list"></ul>
+      </nav>
+
+      <nav class="nav-section">
+        <div class="nav-title"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> 最近打开</div>
+        <ul id="recent-opened-list" class="nav-list"></ul>
+      </nav>
+
+      <div class="theme-switch" id="theme-switch">
+        <div class="theme-switch-label">皮肤</div>
+        <div class="theme-seg">
+          <button data-skin="warm" title="暖色纸感档案馆">档案</button>
+          <button data-skin="terminal" title="终端核 Volt">终端</button>
+          <button data-skin="editorial" title="编辑式 · 索引日报">索引</button>
+        </div>
+      </div>
+      <div class="sidebar-foot">本地运行 · 数据不出本机</div>
+    </aside>
+
+    <!-- 主区 -->
+    <main id="main">
+      <header id="topbar">
+        <div class="nav-buttons">
+          <button id="btn-back" title="后退">←</button>
+          <button id="btn-up" title="上一级">↑</button>
+        </div>
+        <nav id="breadcrumb" class="breadcrumb"></nav>
+        <div class="topbar-actions">
+          <label class="toggle" title="显示隐藏文件">
+            <input type="checkbox" id="toggle-hidden" /> 隐藏文件
+          </label>
+          <div class="seg" id="sort-seg">
+            <button data-sort="name" class="active">名称</button>
+            <button data-sort="mtime">时间</button>
+            <button data-sort="size">大小</button>
+          </div>
+          <div class="seg" id="view-seg">
+            <button data-view="grid" class="active" title="网格">▦</button>
+            <button data-view="list" title="列表">☰</button>
+          </div>
+          <div class="seg" id="gridsize-seg" title="缩略图大小">
+            <button data-size="sm" title="小">·</button>
+            <button data-size="md" class="active" title="中">▪</button>
+            <button data-size="lg" title="大">◼</button>
+          </div>
+          <button id="btn-recent" class="ghost-btn" title="此处最近修改的文件"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> 最近</button>
+          <button id="btn-terminal" class="ghost-btn" title="在当前目录打开系统终端"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg> 终端</button>
+        </div>
+      </header>
+
+      <div id="content">
+        <div id="filter-bar">
+          <input id="quick-filter" placeholder="在当前文件夹快速筛选…" />
+          <span id="dir-meta"></span>
+        </div>
+        <div id="file-area"></div>
+      </div>
+    </main>
+
+    <!-- 预览面板 -->
+    <section id="preview" class="hidden">
+      <div id="preview-resizer" title="拖动调整宽度"></div>
+      <header class="preview-head">
+        <div class="preview-title" id="preview-title"></div>
+        <button id="preview-close" title="关闭">✕</button>
+      </header>
+      <div class="preview-actions" id="preview-actions"></div>
+      <div class="preview-body" id="preview-body"></div>
+    </section>
+  </div>
+
+  <!-- 命令面板 -->
+  <div id="cmdk" class="cmdk-overlay hidden">
+    <div class="cmdk-panel">
+      <div class="cmdk-input-wrap">
+        <span class="cmdk-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#9aa3b2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+        <input id="cmdk-input" placeholder="按文件名搜索…   用 “内容:” 前缀搜文件内容，如 “内容:useState”" autocomplete="off" />
+        <button id="scope-toggle" class="scope-toggle on" title="切换搜索范围（Tab）">⤢ 全机</button>
+        <kbd>ESC</kbd>
+      </div>
+      <div id="cmdk-hint" class="cmdk-hint">范围：<b id="cmdk-scope"></b> · Tab 切换范围 · ↑↓ 选择 · ↵ 打开 · ⌘↵ 在编辑器打开</div>
+      <ul id="cmdk-results" class="cmdk-results"></ul>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- marked / highlight.js：联网时启用富预览，离线时优雅降级为纯文本 -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" onerror="window.__noMarked=1"></script>
+  <link id="hljs-theme" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css" onerror="window.__noHljs=1" />
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/lib/highlight.min.js" onerror="window.__noHljs=1"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
