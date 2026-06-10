@@ -39,7 +39,7 @@ const TEXT_EXT = new Set([
   'r', 'dart', 'gradle', 'properties', 'gitignore', 'dockerfile', 'makefile', 'log',
   'csv', 'tsv', 'gql', 'graphql', 'prisma', 'plist', 'tex', 'rtf', 'srt', 'vtt', 'ass',
 ]);
-const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif']);
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tiff', 'tif']);
 const VIDEO_EXT = new Set(['mp4', 'webm', 'mov', 'm4v', 'ogv']);
 const AUDIO_EXT = new Set(['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac']);
 const PDF_EXT = new Set(['pdf']);
@@ -62,6 +62,17 @@ function ext(name) {
   const i = name.lastIndexOf('.');
   if (i <= 0) return '';
   return name.slice(i + 1).toLowerCase();
+}
+
+// 从一组文件/目录名推断项目类型（签名文件），供当前目录徽章 + 子目录浅探共用
+function projectOf(names) {
+  if (names.has('package.json')) return 'node';
+  if (names.has('index.html')) return 'web';
+  if (names.has('requirements.txt') || names.has('pyproject.toml')) return 'python';
+  if (names.has('Cargo.toml')) return 'rust';
+  if (names.has('go.mod')) return 'go';
+  if (names.has('.git')) return 'git';
+  return null;
 }
 
 function kindOf(name, isDir) {
@@ -162,14 +173,20 @@ async function listDir(dirPath) {
     return a.name.localeCompare(b.name, 'zh', { numeric: true });
   });
   // 识别项目类型（含 package.json / .git / index.html 等）
-  let project = null;
   const names = new Set(entries.map((e) => e.name));
-  if (names.has('package.json')) project = 'node';
-  else if (names.has('index.html')) project = 'web';
-  else if (names.has('requirements.txt') || names.has('pyproject.toml')) project = 'python';
-  else if (names.has('Cargo.toml')) project = 'rust';
-  else if (names.has('go.mod')) project = 'go';
-  else if (names.has('.git')) project = 'git';
+  const project = projectOf(names);
+
+  // 给每个子目录浅探一次项目类型，文件卡片上标徽章——「一下午起的十个项目」一眼认出是 node/web/py
+  // 成本受控：只探目录、且总数封顶；大目录（>80 个子目录）跳过，避免拖慢列表
+  const subDirs = entries.filter((e) => e.isDir && !e.name.startsWith('.'));
+  if (subDirs.length <= 80) {
+    await Promise.all(subDirs.map(async (e) => {
+      try {
+        const inner = await fsp.readdir(e.path);
+        e.project = projectOf(new Set(inner));
+      } catch { /* 无权限等，跳过 */ }
+    }));
+  }
 
   const parts = dir.split(path.sep).filter(Boolean);
   const breadcrumb = [{ name: PLATFORM === 'win32' ? dir.split(path.sep)[0] : '/', path: PLATFORM === 'win32' ? parts[0] + path.sep : path.sep }];
@@ -323,6 +340,55 @@ async function grepFiles(query, rootPath) {
   return { results, truncated };
 }
 
+// ---------- Spotlight（mdfind）内容搜索：白嫖系统索引 ----------
+// 覆盖全文 + PDF/docx + 截图/图片里的 OCR 文字，毫秒级返回；Spotlight 没索引到的（代码目录等）由 grep 兜底
+function mdfind(args) {
+  return new Promise((resolve) => {
+    execFile('mdfind', args, { timeout: 6000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      resolve(err ? null : String(stdout).split('\n').filter(Boolean));
+    });
+  });
+}
+async function contentSearch(query, rootPath) {
+  const root = resolvePath(rootPath);
+  const q = (query || '').trim();
+  if (!q || q.length < 2) return { results: [] };
+  // 属性查询而非自由文本：CJK 子串匹配更稳；[cd] = 忽略大小写/音调
+  const esc = q.replace(/[\\"*]/g, '');
+  const paths = await mdfind(['-onlyin', root, `(kMDItemTextContent == "*${esc}*"cd) || (kMDItemDisplayName == "*${esc}*"cd)`]);
+  if (paths === null || !paths.length) {
+    const fb = await grepFiles(query, rootPath); // mdfind 不可用或无命中 → 原 grep 兜底
+    return { ...fb, engine: 'grep' };
+  }
+  const results = [];
+  const deadline = Date.now() + 2500;
+  for (const p of paths) {
+    if (results.length >= 60 || Date.now() > deadline) break;
+    if (/\/(node_modules|\.git|Library\/Caches)\//.test(p)) continue;
+    let st; try { st = await fsp.stat(p); } catch { continue; }
+    if (st.isDirectory()) continue;
+    const name = path.basename(p);
+    results.push({ name, path: p, isDir: false, kind: kindOf(name, false), hidden: name.startsWith('.'), size: st.size, mtime: st.mtimeMs, btime: st.birthtimeMs || 0 });
+  }
+  results.sort((a, b) => b.mtime - a.mtime); // 近改优先，「我刚写的那句话」浮在最上面
+  // 给文本类命中补行级预览（只读前几个小文件，别拖慢整体）
+  const lower = q.toLowerCase();
+  let read = 0;
+  for (const r of results) {
+    if (read >= 12) break;
+    if (r.kind !== 'text' || r.size > 512 * 1024) continue;
+    read++;
+    let content; try { content = await fsp.readFile(r.path, 'utf8'); } catch { continue; }
+    const lines = content.split('\n');
+    const hits = [];
+    for (let i = 0; i < lines.length && hits.length < 3; i++) {
+      if (lines[i].toLowerCase().includes(lower)) hits.push({ line: i + 1, text: lines[i].trim().slice(0, 200) });
+    }
+    if (hits.length) r.hits = hits;
+  }
+  return { results, truncated: paths.length > results.length, engine: 'spotlight' };
+}
+
 async function recentFiles(rootPath) {
   const root = resolvePath(rootPath);
   const all = [];
@@ -438,6 +504,47 @@ async function locatePath(p, name, root) {
   return { found: false };
 }
 
+// ---------- Git（只读）：让「看 agent 改了什么」从瞬时高亮升级为可回看的 diff ----------
+function execGit(args, cwd) {
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd, timeout: 6000, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, stdout: stdout || '', stderr: stderr || '' });
+    });
+  });
+}
+// 找到 dir 所在 git 仓库根；不是仓库返回 null
+async function gitRoot(dir) {
+  const r = await execGit(['-C', dir, 'rev-parse', '--show-toplevel'], dir);
+  return r.ok ? r.stdout.trim() : null;
+}
+// 仓库工作区状态：返回相对仓库根的变更文件列表（含状态码）
+async function gitStatus(dirPath) {
+  const dir = resolvePath(dirPath);
+  const root = await gitRoot(dir);
+  if (!root) return { isRepo: false };
+  const st = await execGit(['-C', root, 'status', '--porcelain'], root);
+  const files = (st.stdout || '').split('\n').filter(Boolean).map((line) => {
+    const code = line.slice(0, 2);
+    let rest = line.slice(3);
+    if (rest.includes(' -> ')) rest = rest.split(' -> ')[1]; // 重命名取新名
+    rest = rest.replace(/^"|"$/g, '');
+    return { code, status: code.trim(), path: path.join(root, rest), name: path.basename(rest) };
+  });
+  return { isRepo: true, root, files };
+}
+// 单文件 HEAD 版本 vs 工作区当前内容，供 Monaco DiffEditor 并排渲染
+async function gitFileDiff(p) {
+  const file = resolvePath(p);
+  if (!TEXT_EXT.has(ext(file))) return { isRepo: true, diffable: false };
+  const root = await gitRoot(path.dirname(file));
+  if (!root) return { isRepo: false };
+  const rel = path.relative(root, file).split(path.sep).join('/');
+  let modified = '';
+  try { modified = await fsp.readFile(file, 'utf8'); } catch { modified = ''; }
+  const head = await execGit(['-C', root, 'show', `HEAD:${rel}`], root);
+  return { isRepo: true, diffable: true, root, rel, original: head.ok ? head.stdout : '', modified, isNew: !head.ok };
+}
+
 // 图片编辑保存：前端 canvas 导出 dataURL（已含格式/尺寸/质量/标注），这里原子写回
 async function saveImage({ path: target, dataUrl, newName }) {
   const m = /^data:image\/\w+;base64,(.+)$/s.exec(dataUrl || '');
@@ -532,7 +639,8 @@ async function serveStatic(req, res, urlPath) {
   let rel = urlPath === '/' ? '/index.html' : urlPath;
   rel = decodeURIComponent(rel.split('?')[0]);
   const filePath = path.normalize(path.join(PUBLIC, rel));
-  if (!filePath.startsWith(PUBLIC)) { res.writeHead(403); res.end('forbidden'); return; }
+  // 边界要带分隔符，否则 /path/to/public-evil 也会 startsWith('/path/to/public') 通过
+  if (filePath !== PUBLIC && !filePath.startsWith(PUBLIC + path.sep)) { res.writeHead(403); res.end('forbidden'); return; }
   try {
     const data = await fsp.readFile(filePath);
     res.writeHead(200, { 'Content-Type': MIME[ext(filePath)] || 'application/octet-stream' });
@@ -591,7 +699,12 @@ async function serveThumb(req, res, p, size) {
   const key = crypto.createHash('md5').update(src + ':' + st.mtimeMs + ':' + s).digest('hex');
   const cacheFile = path.join(THUMB_DIR, key + (isImg ? '.jpg' : '.png'));
   const type = isImg ? 'image/jpeg' : 'image/png';
-  const sendCache = () => { res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=604800' }); fs.createReadStream(cacheFile).pipe(res); };
+  const sendCache = () => {
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=604800' });
+    const rs = fs.createReadStream(cacheFile);
+    rs.on('error', () => { try { res.destroy(); } catch { /* */ } }); // 读缓存中途出错别让未捕获 error 打挂进程
+    rs.pipe(res);
+  };
   if (fs.existsSync(cacheFile)) return sendCache();
   let pr = thumbInflight.get(cacheFile);
   if (!pr) { pr = generateThumb(src, e, s, cacheFile, isImg).finally(() => thumbInflight.delete(cacheFile)); thumbInflight.set(cacheFile, pr); }
@@ -606,36 +719,66 @@ function serveRaw(req, res, filePath) {
   fs.stat(file, (err, st) => {
     if (err || !st.isFile()) { res.writeHead(404); res.end('not found'); return; }
     const type = MIME[ext(file)] || 'application/octet-stream';
+    const onStreamErr = (rs) => rs.on('error', () => { try { res.destroy(); } catch { /* */ } });
     const range = req.headers.range;
     if (range) {
       const m = /bytes=(\d*)-(\d*)/.exec(range);
-      const startB = m[1] ? parseInt(m[1], 10) : 0;
-      const endB = m[2] ? parseInt(m[2], 10) : st.size - 1;
+      // 钳制到文件实际范围：畸形 Range（如 bytes=99999999-）否则会让 createReadStream 抛未捕获 error 崩进程
+      let startB = m && m[1] ? parseInt(m[1], 10) : 0;
+      let endB = m && m[2] ? parseInt(m[2], 10) : st.size - 1;
+      if (!Number.isFinite(startB) || startB < 0) startB = 0;
+      if (!Number.isFinite(endB) || endB > st.size - 1) endB = st.size - 1;
+      if (startB > endB) {
+        res.writeHead(416, { 'Content-Range': `bytes */${st.size}` });
+        res.end();
+        return;
+      }
       res.writeHead(206, {
         'Content-Type': type,
         'Content-Range': `bytes ${startB}-${endB}/${st.size}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': endB - startB + 1,
       });
-      fs.createReadStream(file, { start: startB, end: endB }).pipe(res);
+      const rs = fs.createReadStream(file, { start: startB, end: endB });
+      onStreamErr(rs); rs.pipe(res);
     } else {
       res.writeHead(200, { 'Content-Type': type, 'Content-Length': st.size, 'Accept-Ranges': 'bytes' });
-      fs.createReadStream(file).pipe(res);
+      const rs = fs.createReadStream(file);
+      onStreamErr(rs); rs.pipe(res);
     }
   });
 }
 
+const MAX_BODY = 64 * 1024 * 1024; // 64MB 上限，防止恶意请求无限累加把内存撑爆
 function readBody(req) {
   return new Promise((resolve) => {
     let data = '';
-    req.on('data', (c) => { data += c; });
-    req.on('end', () => { try { resolve(JSON.parse(data || '{}')); } catch { resolve({}); } });
+    let size = 0;
+    let aborted = false;
+    req.on('data', (c) => {
+      if (aborted) return;
+      size += c.length;
+      if (size > MAX_BODY) { aborted = true; try { req.destroy(); } catch { /* */ } resolve({}); return; }
+      data += c;
+    });
+    req.on('end', () => { if (!aborted) { try { resolve(JSON.parse(data || '{}')); } catch { resolve({}); } } });
+    req.on('error', () => { if (!aborted) { aborted = true; resolve({}); } });
   });
 }
 
 // ---------- 路由 ----------
 
+// 只接受指向本机回环地址的 Host。挡住 DNS rebinding：恶意网页把自己的域名重绑定到
+// 127.0.0.1 后，浏览器流量打到本机服务、origin 仍是攻击者域名却被当成同源，CORS 失效，
+// 进而可调用文件读写 API 读全盘。校验 Host 头是最便宜也最有效的拦截。
+const ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+function hostAllowed(req) {
+  const host = (req.headers.host || '').replace(/:\d+$/, '');
+  return ALLOWED_HOSTS.has(host);
+}
+
 const server = http.createServer(async (req, res) => {
+  if (!hostAllowed(req)) { res.writeHead(403); res.end('forbidden host'); return; }
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
   const qp = url.searchParams;
@@ -653,6 +796,13 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/raw') {
       return serveRaw(req, res, qp.get('path'));
     }
+    // 路径镜像端点：/fs/<绝对路径> 按真实磁盘路径出文件。
+    // HTML 预览的 iframe 指到这里后，页面里的相对引用（./img.png、子目录、嵌套 iframe）
+    // 都能按所在目录正确解析——srcdoc 方案没有 base URL，这些全是裂的。
+    // 暴露面与 /api/raw 等价（都接受任意绝对路径），且同样只对本机回环开放。
+    if (p.startsWith('/fs/')) {
+      return serveRaw(req, res, decodeURIComponent(p.slice(3)));
+    }
     if (p === '/api/thumb') {
       return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10));
     }
@@ -662,11 +812,20 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/grep') {
       return sendJSON(res, 200, await grepFiles(qp.get('q'), qp.get('root') || HOME));
     }
+    if (p === '/api/content') {
+      return sendJSON(res, 200, await contentSearch(qp.get('q'), qp.get('root') || HOME));
+    }
     if (p === '/api/recent') {
       return sendJSON(res, 200, await recentFiles(qp.get('root') || HOME));
     }
     if (p === '/api/locate') {
       return sendJSON(res, 200, await locatePath(qp.get('path'), qp.get('name'), qp.get('root')));
+    }
+    if (p === '/api/git') {
+      return sendJSON(res, 200, await gitStatus(qp.get('path') || HOME));
+    }
+    if (p === '/api/git-file') {
+      return sendJSON(res, 200, await gitFileDiff(qp.get('path')));
     }
     if (p === '/api/open' && req.method === 'POST') {
       const body = await readBody(req);

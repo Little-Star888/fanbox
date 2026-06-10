@@ -3,7 +3,7 @@
  * 安全桥接：把终端 IPC 暴露给渲染进程（contextIsolation 下唯一的通道）。
  * 渲染进程通过 window.fanboxPty 控制 node-pty，window.fanboxEnv 判断是否在桌面 app 内。
  */
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('fanboxPty', {
   spawn: (opts) => ipcRenderer.invoke('pty:spawn', opts),
@@ -17,12 +17,20 @@ contextBridge.exposeInMainWorld('fanboxPty', {
 
 contextBridge.exposeInMainWorld('fanboxFs', {
   watch: (dir) => ipcRenderer.invoke('fs:watch', { dir }),
+  watchSet: (dirs) => ipcRenderer.invoke('fs:watch-set', { dirs }),
   onChanged: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('fs:changed', h); return () => ipcRenderer.removeListener('fs:changed', h); },
 });
 
 contextBridge.exposeInMainWorld('fanboxClipboard', {
   copyImage: (path) => ipcRenderer.invoke('clip:image', { path }),
   copyFile: (path) => ipcRenderer.invoke('clip:file', { path }),
+});
+
+contextBridge.exposeInMainWorld('fanboxDrop', {
+  // 系统拖入的 File → 真实路径（Electron 32+ 移除了 File.path，须走 webUtils）
+  pathForFile: (file) => { try { return webUtils.getPathForFile(file) || ''; } catch { return ''; } },
+  // file-promise 类拖拽（如 macOS 截图浮窗缩略图）没有现成路径：把内容落盘到临时目录换一个路径
+  saveTemp: (name, buf) => ipcRenderer.invoke('drop:save', { name, buf }),
 });
 
 contextBridge.exposeInMainWorld('fanboxEnv', {

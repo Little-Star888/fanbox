@@ -32,7 +32,14 @@ const SVG = {
   edit3: '<path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
   inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
   globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+  gitbranch: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  // 高辨识度文件类型图标
+  md: '<rect x="2.5" y="5" width="19" height="14" rx="2"/><path d="M6 15.5V9l3 3 3-3v6.5"/><path d="M17 9v4.5"/><path d="M14.8 12.5L17 15l2.2-2.5"/>',
+  html: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><polyline points="9.3 12.5 7.5 14.5 9.3 16.5"/><polyline points="14.7 12.5 16.5 14.5 14.7 16.5"/>',
+  pdf: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M7.6 13.5h1.3a1.2 1.2 0 0 1 0 2.4H7.6zm0 0v4.2"/><path d="M12.4 13.5v4.2h1a1.5 1.5 0 0 0 1.5-1.5v-1.2a1.5 1.5 0 0 0-1.5-1.5z"/>',
 };
+// 按扩展名优先匹配的专属图标（比按 kind 更精准、辨识度更高）
+const ICON_BY_EXT = { md: 'md', markdown: 'md', html: 'html', htm: 'html', pdf: 'pdf' };
 // UI 图标快捷函数（默认 currentColor，随主题文字色自适应）
 function ic(name, color, size) { return svgWrap(SVG[name], color || 'currentColor', size || 16, false); }
 // ext → 类别 + 颜色
@@ -78,11 +85,14 @@ function iconColorFor(e) {
   return KIND_COLOR[e.kind] || KIND_COLOR.other;
 }
 function iconSvg(e, size = 22) {
+  const rich = richIcon(e, size); // 强色实体字形优先
+  if (rich) return rich;
   const color = iconColorFor(e);
   if (e.isDir) return svgWrap(SVG.folder, color, size, true);
   const ex = (e.name.split('.').pop() || '').toLowerCase();
   let shape = SVG[e.kind] || SVG.file;
   if (EXT_KIND[ex]) shape = SVG[EXT_KIND[ex][0]];
+  if (ICON_BY_EXT[ex]) shape = SVG[ICON_BY_EXT[ex]]; // 专属图标优先（md/html/pdf）
   return svgWrap(shape, color, size);
 }
 function svgWrap(inner, color, size, fill) {
@@ -91,6 +101,78 @@ function svgWrap(inner, color, size, fill) {
   const fillOp = (fill && isCur) ? ' fill-opacity="0.15"' : '';
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="${fillVal}"${fillOp} stroke="${color}" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
 }
+
+// ---------- 强色实体文件图标（10x 识别度）----------
+// 文档族：实色页面 + 折角 + 白色短标签；代码族：品牌色圆角徽章 + 字母；媒体/压缩各有专属形。
+// 颜色烧死在图标里，跨三套皮肤都醒目——一眼认出「这是个 PDF / JS / 压缩包」。
+function gWrap(size, inner) { return `<svg class="rich-glyph" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none">${inner}</svg>`; }
+function gDoc(color, fold) {
+  return `<path d="M5 3.6A1.6 1.6 0 0 1 6.6 2H14l5 5v11.4A1.6 1.6 0 0 1 17.4 20H6.6A1.6 1.6 0 0 1 5 18.4z" fill="${color}"/>`
+    + `<path d="M14 2l5 5h-3.4A1.6 1.6 0 0 1 14 5.4z" fill="${fold}"/>`;
+}
+function gLabel(t, fs) { return `<text x="11.6" y="16.6" text-anchor="middle" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="${fs}" letter-spacing="0.1" fill="#fff">${t}</text>`; }
+function gBadge(color) { return `<rect x="3" y="3" width="18" height="18" rx="5" fill="${color}"/>`; }
+function gInit(t, fs, color) { return `<text x="12" y="15.7" text-anchor="middle" font-family="-apple-system,'Helvetica Neue',Arial,sans-serif" font-weight="800" font-size="${fs}" fill="${color}">${t}</text>`; }
+// 文档族：[标签, 字号, 主体色, 折角色]
+const DOC_TYPES = {
+  pdf: ['PDF', 5, '#E64A3B', '#C23E31'],
+  md: ['MD', 7, '#3B82F6', '#2E68C8'], markdown: ['MD', 7, '#3B82F6', '#2E68C8'],
+  html: ['&lt;&gt;', 7, '#E8662A', '#C4541F'], htm: ['&lt;&gt;', 7, '#E8662A', '#C4541F'],
+  css: ['CSS', 5, '#2D6FD6', '#2459AC'], scss: ['SCSS', 4, '#CF649A', '#A94E7C'], less: ['LESS', 4, '#2D5B8A', '#244A70'],
+  json: ['{ }', 7, '#A6824C', '#856A3E'], json5: ['{ }', 7, '#A6824C', '#856A3E'],
+  yml: ['YML', 5, '#9C5BD6', '#7E49AC'], yaml: ['YAML', 4.2, '#9C5BD6', '#7E49AC'], toml: ['TOML', 4.2, '#9C5BD6', '#7E49AC'],
+  xml: ['XML', 5, '#5E8A3E', '#4A6E31'], svg: ['SVG', 5, '#E8923A', '#C4761F'],
+  csv: ['CSV', 5, '#1FAE5A', '#188F4A'], tsv: ['TSV', 5, '#1FAE5A', '#188F4A'],
+  sql: ['SQL', 5, '#C77D2E', '#A4661F'],
+  doc: ['DOC', 5, '#2B579A', '#21457A'], docx: ['DOC', 5, '#2B579A', '#21457A'],
+  xls: ['XLS', 5, '#1D6F42', '#155632'], xlsx: ['XLS', 5, '#1D6F42', '#155632'],
+  ppt: ['PPT', 5, '#C43E1C', '#9E3216'], pptx: ['PPT', 5, '#C43E1C', '#9E3216'],
+  log: ['LOG', 5, '#7A8290', '#626977'], txt: ['TXT', 5, '#7A8290', '#626977'],
+};
+// 代码族：[字母, 字号, 徽章色, 字色]
+const CODE_BADGES = {
+  js: ['JS', 8, '#F0DB4F', '#1A1A1A'], mjs: ['JS', 8, '#F0DB4F', '#1A1A1A'], cjs: ['JS', 8, '#F0DB4F', '#1A1A1A'],
+  jsx: ['JSX', 6, '#61DAFB', '#1A1A1A'],
+  ts: ['TS', 8, '#3178C6', '#fff'], tsx: ['TSX', 6, '#3178C6', '#fff'],
+  py: ['PY', 8, '#3776AB', '#FFE05B'],
+  go: ['GO', 7.5, '#00ACD7', '#fff'], rs: ['RS', 8, '#CE7B43', '#fff'],
+  java: ['JV', 8, '#E7700E', '#fff'], kt: ['KT', 8, '#A97BFF', '#fff'],
+  rb: ['RB', 8, '#CC342D', '#fff'], php: ['PHP', 6, '#7A86B8', '#fff'],
+  c: ['C', 9, '#5C6BC0', '#fff'], h: ['H', 9, '#5C6BC0', '#fff'], cpp: ['C++', 6, '#5C6BC0', '#fff'], cc: ['C++', 6, '#5C6BC0', '#fff'],
+  vue: ['Vue', 6, '#41B883', '#fff'], swift: ['SW', 8, '#F05138', '#fff'], dart: ['DT', 8, '#0A9EDC', '#fff'],
+  sh: ['&gt;_', 8, '#33373D', '#3FD46A'], bash: ['&gt;_', 8, '#33373D', '#3FD46A'], zsh: ['&gt;_', 8, '#33373D', '#3FD46A'],
+};
+const ARCHIVE_EXT = new Set(['zip', 'rar', '7z', 'gz', 'tar', 'tgz', 'bz2', 'xz']);
+// 文件夹：干净扁平的单色实心文件夹（强色 + 简洁几何，不做作）
+function gFolder(size, color) {
+  return `<svg class="rich-glyph" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none">`
+    + `<path d="M3.6 5.5h4.4a1.2 1.2 0 0 1 .85.35l1.3 1.3a1.2 1.2 0 0 0 .85.35H20a1.6 1.6 0 0 1 1.6 1.6v8.45A1.6 1.6 0 0 1 20 19.1H4A1.6 1.6 0 0 1 2.4 17.5V6.7A1.2 1.2 0 0 1 3.6 5.5z" fill="${color}"/>`
+    + `</svg>`;
+}
+function richIcon(e, size) {
+  if (e.isDir) return gFolder(size, iconColorFor(e));
+  const ex = (e.name.split('.').pop() || '').toLowerCase();
+  if (DOC_TYPES[ex]) { const [l, fs, c, f] = DOC_TYPES[ex]; return gWrap(size, gDoc(c, f) + gLabel(l, fs)); }
+  if (CODE_BADGES[ex]) { const [l, fs, c, t] = CODE_BADGES[ex]; return gWrap(size, gBadge(c) + gInit(l, fs, t)); }
+  if (ARCHIVE_EXT.has(ex)) {
+    return gWrap(size, `<rect x="4" y="3.5" width="16" height="17" rx="2.2" fill="#E0A23B"/><rect x="4" y="3.5" width="16" height="17" rx="2.2" fill="#000" opacity="0.06"/>`
+      + `<rect x="10.6" y="3.5" width="2.8" height="17" fill="#C8862A"/>`
+      + `<rect x="10.6" y="8" width="2.8" height="3" rx="0.5" fill="#fff8e6"/><rect x="11.4" y="11" width="1.2" height="3.4" rx="0.6" fill="#fff8e6"/>`);
+  }
+  if (e.kind === 'audio') {
+    return gWrap(size, gBadge('#E0457B') + `<g stroke="#fff" stroke-width="1.5" stroke-linecap="round"><line x1="8" y1="10" x2="8" y2="14"/><line x1="10.7" y1="8" x2="10.7" y2="16"/><line x1="13.3" y1="9.5" x2="13.3" y2="14.5"/><line x1="16" y1="7.5" x2="16" y2="16.5"/></g>`);
+  }
+  if (e.kind === 'video') {
+    return gWrap(size, gBadge('#7C5CE0') + `<path d="M10 8.5l5 3.5-5 3.5z" fill="#fff"/>`);
+  }
+  if (e.kind === 'image') {
+    return gWrap(size, gBadge('#2BB6A3') + `<circle cx="9" cy="9.5" r="1.6" fill="#fff"/><path d="M5 16l3.5-3.5 2.5 2.5L14.5 11 19 16z" fill="#fff"/>`);
+  }
+  return null; // 未知类型回退到细线通用图标
+}
+// 缩略图加载失败时的回退（覆盖前面用细线图标的版本，改用强色实体字形）
+window.__svgImg = richIcon({ name: '_.jpg', kind: 'image' }, 40);
+window.__svgVideo = richIcon({ name: '_.mp4', kind: 'video' }, 40);
 
 const state = {
   cwd: null, home: null, platform: 'darwin', sep: '/',
@@ -105,6 +187,10 @@ const state = {
   previewW: Number(localStorage.getItem('fb_preview_w')) || 480,
   previewH: Number(localStorage.getItem('fb_preview_h')) || 340,
   sidebarCollapsed: localStorage.getItem('fb_sidebar_collapsed') === '1',
+  sidebarW: Math.min(420, Math.max(190, Number(localStorage.getItem('fb_sidebar_w')) || 248)),
+  muted: localStorage.getItem('fb_muted') === '1', // WOW4 提示音静音开关
+  changeLog: [], // 本会话 agent 改过的文件（跨所有监听目录，按文件去重、最新置顶），供「变更」面板回看
+  changeTimeline: [], // 每一次写入事件（不去重，带时间戳），供「会话回放」拖时间轴重现
 };
 
 // ---------- 工具 ----------
@@ -141,8 +227,22 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// ---------- 未保存守卫 ----------
+// 文本/图片编辑期间，离开当前编辑器（点别的文件、跳目录、关预览）都要先确认，
+// 否则会静默丢掉改动。dirtyCheck 在进入编辑器时挂上，保存/确认离开后清空。
+let dirtyCheck = null; // () => boolean，true=有未保存改动；null=当前没有编辑器
+async function guardDirty() {
+  if (dirtyCheck && dirtyCheck()) {
+    const ok = await confirmDialog('当前编辑有未保存的改动，放弃并离开？');
+    if (!ok) return false;
+  }
+  dirtyCheck = null;
+  return true;
+}
+
 // ---------- 导航 ----------
 async function navigate(p, pushHistory = true) {
+  if (!await guardDirty()) return;
   try {
     const data = await api('/api/list?path=' + encodeURIComponent(p));
     if (data.error) { toast('无法打开：' + data.error, true); return; }
@@ -158,10 +258,19 @@ async function navigate(p, pushHistory = true) {
     $('#quick-filter').value = '';
     render();
     renderRootsActive();
-    // 联动：监听此目录的文件变化（agent 改文件→自动刷新）；终端跟随则 cd 过去
-    if (window.fanboxFs) window.fanboxFs.watch(state.cwd);
+    // 联动：监听此目录 + 各终端项目目录的文件变化（agent 改文件→自动刷新）；终端跟随则 cd 过去
+    updateWatches();
     if (typeof term !== 'undefined' && term.followBrowse && term.active) term.syncCd(state.cwd);
   } catch (e) { toast('打开失败', true); }
+}
+// 汇总当前要监听的目录：浏览目录 + 每个终端会话的项目目录，发给主进程做增量监听
+function updateWatches() {
+  if (!window.fanboxFs) return;
+  const dirs = new Set();
+  if (state.cwd) dirs.add(state.cwd);
+  if (typeof term !== 'undefined') term.sessions.forEach((s) => { if (s.startDir) dirs.add(s.startDir); });
+  if (window.fanboxFs.watchSet) window.fanboxFs.watchSet([...dirs]);
+  else window.fanboxFs.watch(state.cwd); // 旧版主进程兜底
 }
 // shell 单引号转义（用于把路径塞进终端 cd 命令）
 function shQuote(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
@@ -201,7 +310,9 @@ function visibleEntries() {
   if (!state.showHidden) list = list.filter((e) => !e.hidden);
   if (state.filter) { const f = state.filter.toLowerCase(); list = list.filter((e) => e.name.toLowerCase().includes(f)); }
   const dirFirst = (a, b) => (a.isDir !== b.isDir ? (a.isDir ? -1 : 1) : 0);
-  if (state.sort === 'mtime') list.sort((a, b) => dirFirst(a, b) || b.mtime - a.mtime);
+  // 最近修改视图：以时间为本义，默认按 mtime 倒序（用户可显式切到大小/名称）
+  if (state.recentMode && state.sort === 'name') list.sort((a, b) => b.mtime - a.mtime);
+  else if (state.sort === 'mtime') list.sort((a, b) => dirFirst(a, b) || b.mtime - a.mtime);
   else if (state.sort === 'size') list.sort((a, b) => dirFirst(a, b) || b.size - a.size);
   else list.sort((a, b) => dirFirst(a, b) || a.name.localeCompare(b.name, 'zh', { numeric: true }));
   return list;
@@ -213,17 +324,13 @@ function renderFiles() {
   const dirs = list.filter((e) => e.isDir).length;
   $('#dir-meta').textContent = `${dirs} 个文件夹 · ${list.length - dirs} 个文件`;
   if (!list.length) {
-    area.innerHTML = `<div class="empty-state"><div class="big">${ic('inbox', 'currentColor', 48)}</div>${state.filter ? '没有匹配的文件' : '这个文件夹是空的'}</div>`;
+    const emptyMsg = state.recentMode ? (state.filter ? '没有匹配的文件' : '没找到最近修改的文件') : (state.filter ? '没有匹配的文件' : '这个文件夹是空的');
+    const emptyIc = state.recentMode ? 'clock' : 'inbox';
+    area.innerHTML = `<div class="empty-state"><div class="big">${ic(emptyIc, 'currentColor', 48)}</div>${emptyMsg}</div>`;
     return;
   }
-  if (state.view === 'grid') {
-    const grid = document.createElement('div');
-    grid.className = 'grid size-' + state.gridSize;
-    list.forEach((e, i) => grid.appendChild(gridItem(e, i)));
-    area.innerHTML = '';
-    area.appendChild(grid);
-    measureCols();
-  } else {
+  // 最近修改是跨目录平铺列表，强制列表视图并显示来源目录
+  if (state.recentMode || state.view === 'list') {
     const wrap = document.createElement('div');
     wrap.className = 'list';
     const head = document.createElement('div');
@@ -233,8 +340,18 @@ function renderFiles() {
     list.forEach((e, i) => wrap.appendChild(listRow(e, i)));
     area.innerHTML = '';
     area.appendChild(wrap);
+    if (state.recentMode && state.recentTruncated) area.insertAdjacentHTML('beforeend', truncNote());
     state.cols = 1;
+    highlightCursor();
+    return;
   }
+  // 至此只剩网格视图（列表/最近已在上面提前返回）
+  const grid = document.createElement('div');
+  grid.className = 'grid size-' + state.gridSize;
+  list.forEach((e, i) => grid.appendChild(gridItem(e, i)));
+  area.innerHTML = '';
+  area.appendChild(grid);
+  measureCols();
   highlightCursor();
 }
 function measureCols() {
@@ -254,30 +371,46 @@ function thumbHtml(e) {
   if (e.kind === 'image' || e.kind === 'video') {
     const w = state.gridSize === 'lg' ? 320 : (state.gridSize === 'sm' ? 160 : 240);
     const fb = e.kind === 'video' ? 'window.__svgVideo' : 'window.__svgImg';
-    return `<img class="thumb" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=${w}" alt="" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
+    // 照片按原比例呈现（object-fit:contain）+ 柔和投影，像散落的照片；缩略图失败回退强色字形
+    const img = `<img class="thumb" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=${w}&v=${e.mtime || 0}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
+    const play = e.kind === 'video' ? '<span class="play-badge"><svg viewBox="0 0 24 24" width="40%" height="40%"><path d="M8 5.5l11 6.5-11 6.5z" fill="#fff"/></svg></span>' : '';
+    return `<span class="thumb-wrap${e.kind === 'video' ? ' is-video' : ''}">${img}${play}</span>`;
   }
-  return `<span class="svg-icon">${iconSvg(e, state.gridSize === 'lg' ? 44 : 34)}</span>`;
+  const gs = state.gridSize;
+  // 文件夹比文件略大，强化「容器」存在感；按网格尺寸分三档
+  const sz = e.isDir
+    ? (gs === 'lg' ? 84 : gs === 'sm' ? 46 : 64)
+    : (gs === 'lg' ? 72 : gs === 'sm' ? 40 : 56);
+  return `<span class="svg-icon">${iconSvg(e, sz)}</span>`;
+}
+// 项目类型徽章：文件夹卡片上标 node/web/py… 一眼认出 AI 起的项目
+const PROJ_LABEL = { node: 'node', web: 'web', python: 'py', rust: 'rs', go: 'go', git: 'git' };
+function projBadge(e) {
+  if (!e.isDir || !e.project || !PROJ_LABEL[e.project]) return '';
+  return `<span class="proj-tag proj-${e.project}">${PROJ_LABEL[e.project]}</span>`;
 }
 function gridItem(e, i) {
   const el = document.createElement('div');
   const chg = state.changed && state.changed.get(e.name);
-  el.className = 'item' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chg ? ' changed' : '');
+  el.className = 'item' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chg ? ' changed' : '');
   el.dataset.idx = i;
   el.dataset.path = e.path;
-  if (chg) { el.dataset.changed = chg.count > 1 ? '改·' + chg.count : '改'; if (chg.files.size) el.title = '刚变更：\n' + [...chg.files].join('\n'); }
-  el.innerHTML = `<div class="icon" style="--tint:${iconColorFor(e)}">${thumbHtml(e)}</div><div class="fname">${escapeHtml(e.name)}</div>${favBtn(e)}`;
+  if (chg) { el.dataset.changed = chg.count > 1 ? '改·' + chg.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chg.count * 0.12).toFixed(2)); if (chg.files.size) el.title = '刚变更：\n' + [...chg.files].join('\n'); }
+  el.innerHTML = `<div class="icon" style="--tint:${iconColorFor(e)}">${thumbHtml(e)}${projBadge(e)}</div><div class="fname">${escapeHtml(e.name)}</div>${favBtn(e)}`;
   bindItem(el, e);
   return el;
 }
 function listRow(e, i) {
   const el = document.createElement('div');
   const chgR = state.changed && state.changed.get(e.name);
-  el.className = 'row' + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chgR ? ' changed' : '');
+  el.className = 'row' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chgR ? ' changed' : '');
   el.dataset.idx = i;
   el.dataset.path = e.path;
-  if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
-  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=96" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
-    <div class="fname">${escapeHtml(e.name)}</div>
+  if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chgR.count * 0.12).toFixed(2)); if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
+  // 最近修改是跨目录列表，名称后缀显示来源目录，方便区分同名文件
+  const dirHint = state.recentMode ? ` <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>` : '';
+  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=96&v=${e.mtime || 0}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
+    <div class="fname">${escapeHtml(e.name)}${projBadge(e)}${dirHint}</div>
     <div class="meta">${fmtTime(e.mtime)}</div>
     <div class="meta">${e.isDir ? '' : fmtSize(e.size)}</div>
     ${favBtn(e)}`;
@@ -349,6 +482,7 @@ function cursorEnter(editor) {
 
 // ---------- 预览 ----------
 async function openPreview(e) {
+  if (!await guardDirty()) return;
   mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null; // 离开编辑态时回收编辑器（连带 worker），避免泄漏
   showPreviewPanel();
   $('#preview-title').textContent = e.name;
@@ -358,9 +492,12 @@ async function openPreview(e) {
   renderPreviewFoot(e);
   const k = e.kind;
   if (k === 'image') {
-    // 预览用中等缩略图（秒开），点击放大走原图 lightbox
-    body.innerHTML = `<img class="pv-img" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=1000" title="点击放大" onerror="this.src='/api/raw?path=${encodeURIComponent(e.path)}'">`;
-    body.querySelector('.pv-img').onclick = () => lightbox(e.path);
+    // 预览用中等缩略图（秒开）。heic/heif/tiff 浏览器无法直接渲染原图，统一走 sips 缩略图端点
+    const exi = (e.name.split('.').pop() || '').toLowerCase();
+    const nativeImg = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(exi);
+    const fallback = nativeImg ? `/api/raw?path=${encodeURIComponent(e.path)}&v=${e.mtime || 0}` : `/api/thumb?path=${encodeURIComponent(e.path)}&w=1600&v=${e.mtime || 0}`;
+    body.innerHTML = `<img class="pv-img" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=1000&v=${e.mtime || 0}" title="点击放大" onerror="this.onerror=null;this.src='${fallback}'">`;
+    body.querySelector('.pv-img').onclick = () => lightbox(e.path, nativeImg, e.mtime);
   } else if (k === 'video') {
     body.innerHTML = `<video controls src="/api/raw?path=${encodeURIComponent(e.path)}"></video>`;
   } else if (k === 'audio') {
@@ -413,7 +550,10 @@ function renderHtmlPreview(data, meta) {
   const body = $('#preview-body');
   body.innerHTML = meta +
     `<div class="pv-toolbar"><button id="html-toggle" class="ghost-btn">查看源码</button><button id="html-browser" class="ghost-btn">${ic('globe', 'currentColor', 13)} 浏览器打开（看完整交互）</button></div>` +
-    `<iframe class="iframe-preview" sandbox="allow-scripts allow-same-origin" srcdoc="${escapeHtml(data.content || '')}"></iframe>`;
+    // 只给 allow-scripts，不给 allow-same-origin：让预览的 HTML 落到独立 origin，
+    // 否则它的脚本可经 window.parent 摸到 preload 暴露的 fanboxPty.spawn → 预览一个文件就能 RCE。
+    // 需要完整同源交互的页面走「浏览器打开」按钮。
+    `<iframe class="iframe-preview" sandbox="allow-scripts" srcdoc="${escapeHtml(data.content || '')}"></iframe>`;
   let src = false;
   $('#html-browser').onclick = () => openWith(data.path, 'default');
   $('#html-toggle').onclick = () => {
@@ -427,6 +567,27 @@ function renderHtmlPreview(data, meta) {
     } else { renderHtmlPreview(data, meta); }
   };
 }
+// 查看改动：HEAD 版本 vs 工作区当前内容，用 Monaco 只读 DiffEditor 并排渲染
+async function showDiff(e) {
+  const data = await api('/api/git-file?path=' + encodeURIComponent(e.path));
+  if (!data.isRepo) { toast('该文件不在 git 仓库里', true); return; }
+  if (!data.diffable) { toast('该类型不支持 diff', true); return; }
+  if (!data.isNew && (data.original || '') === (data.modified || '')) { toast('与 HEAD 无差异'); return; }
+  if (!await mona.load()) { toast('编辑器未就绪', true); return; }
+  if (!await guardDirty()) return;
+  mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null;
+  showPreviewPanel();
+  applySelection(e.path);
+  $('#preview-title').textContent = (data.isNew ? '新增 · ' : '改动 · ') + e.name;
+  renderPreviewActions(e);
+  renderPreviewFoot(e);
+  const body = $('#preview-body');
+  body.innerHTML =
+    `<div class="editor-bar"><span class="editor-hint">${data.isNew ? '新文件（HEAD 中不存在）' : '左：HEAD　·　右：当前工作区'} · 只读</span><button id="diff-close" class="ghost-btn">返回预览</button></div>` +
+    `<div id="ed-host" class="mona-host"></div>`;
+  mona.openDiff($('#ed-host'), data.original, data.modified, (e.name.split('.').pop() || '').toLowerCase());
+  $('#diff-close').onclick = () => openPreview(e);
+}
 function renderPreviewActions(e) {
   const box = $('#preview-actions');
   box.innerHTML = '';
@@ -435,6 +596,7 @@ function renderPreviewActions(e) {
   const acts = [
     { icon: ic('link', 'currentColor', 14), label: '打开', title: '默认应用打开', cls: 'primary', fn: () => openWith(e.path, 'default') },
     ...(e.kind === 'text' ? [{ icon: ic('edit3', 'currentColor', 15), title: '编辑文本', fn: () => enterEditMode(e) }] : []),
+    ...(e.kind === 'text' ? [{ icon: ic('gitbranch', 'currentColor', 15), title: '查看改动（HEAD vs 当前）', fn: () => showDiff(e) }] : []),
     ...(e.kind === 'image' ? [{ icon: ic('edit3', 'currentColor', 15), title: '编辑图片', fn: () => enterImageEdit(e) }] : []),
     { icon: ic('term', 'currentColor', 15), title: '在编辑器打开', fn: () => openWith(e.path, 'editor') },
     { icon: ic('folder', 'currentColor', 15), title: '在访达显示', fn: () => openWith(e.path, 'reveal') },
@@ -445,7 +607,8 @@ function renderPreviewActions(e) {
   acts.forEach((a) => {
     const b = document.createElement('button');
     b.className = (a.cls || '') + (a.label ? '' : ' icon-only');
-    b.title = a.title || a.label || '';
+    // 有可见文字的按钮不需气泡；纯图标按钮用 data-tip 即时气泡（不再用慢吞吞的原生 title）
+    if (!a.label && a.title) b.dataset.tip = a.title;
     b.innerHTML = a.label ? `${a.icon}<span>${a.label}</span>` : a.icon;
     b.onclick = a.fn;
     box.appendChild(b);
@@ -465,7 +628,8 @@ function renderPreviewFoot(e) {
 }
 async function copyImage(p) { const r = await window.fanboxClipboard.copyImage(p); toast(r.ok ? '已复制图片，可粘贴到其它应用' : '复制图片失败：' + (r.error || ''), !r.ok); }
 async function copyFile(p) { const r = await window.fanboxClipboard.copyFile(p); toast(r.ok ? '已复制文件，可在访达里粘贴' : '复制文件失败', !r.ok); }
-function closePreview() {
+async function closePreview() {
+  if (!await guardDirty()) return;
   mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null;
   animateLayout();
   $('#preview').classList.add('hidden');
@@ -473,10 +637,13 @@ function closePreview() {
   applySelection(null);
   term.fitActive();
 }
-function lightbox(path) {
+function lightbox(path, nativeImg, mtime) {
+  // heic/heif/tiff 无法渲染原图，放大也用大尺寸缩略图
+  if (nativeImg === undefined) { const ex = (path.split('.').pop() || '').toLowerCase(); nativeImg = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(ex); }
+  const src = nativeImg ? `/api/raw?path=${encodeURIComponent(path)}&v=${mtime || 0}` : `/api/thumb?path=${encodeURIComponent(path)}&w=1600&v=${mtime || 0}`;
   const ov = document.createElement('div');
   ov.className = 'lightbox';
-  ov.innerHTML = `<img src="/api/raw?path=${encodeURIComponent(path)}"><div class="lb-hint">点击空白处关闭 · 滚轮缩放</div>`;
+  ov.innerHTML = `<img src="${src}"><div class="lb-hint">点击空白处关闭 · 滚轮缩放</div>`;
   let scale = 1;
   const img = ov.querySelector('img');
   ov.onclick = (ev) => { if (ev.target === ov) ov.remove(); };
@@ -485,7 +652,91 @@ function lightbox(path) {
 }
 // 布局：侧栏(可折叠) + 主区；折叠时侧栏 display:none 退出栅格，故改单列 1fr 让主区铺满
 function applyLayout() {
-  $('#app').style.gridTemplateColumns = state.sidebarCollapsed ? '1fr' : '248px 1fr';
+  $('#app').style.gridTemplateColumns = state.sidebarCollapsed ? '1fr' : `${state.sidebarW}px 1fr`;
+  document.documentElement.style.setProperty('--sidebar-w', state.sidebarW + 'px'); // 供拖拽条 fixed 定位
+}
+// WOW3：把选中的文字做成一个残影「甩」进终端，落地时终端闪一下——交互本身就是惊喜
+function flingToTerminal(text, fromRect) {
+  const panel = $('#terminal-panel');
+  const tRect = (panel && !panel.classList.contains('hidden')) ? panel.getBoundingClientRect() : null;
+  const ghost = document.createElement('div');
+  ghost.className = 'fling-ghost';
+  ghost.textContent = text.length > 42 ? text.slice(0, 42) + '…' : text;
+  const sx = fromRect.left, sy = fromRect.top;
+  ghost.style.left = sx + 'px'; ghost.style.top = sy + 'px';
+  document.body.appendChild(ghost);
+  const tx = tRect ? (tRect.left + tRect.width / 2 - 60) : window.innerWidth - 120;
+  const ty = tRect ? (tRect.top + tRect.height / 2) : window.innerHeight - 80;
+  requestAnimationFrame(() => {
+    ghost.style.transform = `translate(${tx - sx}px, ${ty - sy}px) scale(0.25) rotate(7deg)`;
+    ghost.style.opacity = '0';
+  });
+  ghost.addEventListener('transitionend', () => ghost.remove(), { once: true });
+  setTimeout(() => ghost.remove(), 800); // 兜底清理
+  if (panel && tRect) { panel.classList.remove('term-catch'); void panel.offsetWidth; panel.classList.add('term-catch'); setTimeout(() => panel.classList.remove('term-catch'), 520); }
+}
+// 在预览里选中文字 → 浮现「发到终端」按钮，一键把这段作为上下文喂给 agent（md/代码/文本预览生效）
+function bindSelectionToTerminal() {
+  const body = $('#preview-body');
+  if (!body) return;
+  let btn = null;
+  const hide = () => { if (btn) { btn.remove(); btn = null; } };
+  const show = () => {
+    const sel = window.getSelection();
+    const text = sel && sel.toString().trim();
+    if (!text || !term.available()) { hide(); return; }
+    const node = sel.anchorNode;
+    const host = node && (node.nodeType === 3 ? node.parentNode : node);
+    if (!host || !body.contains(host)) { hide(); return; } // 选区必须落在预览正文里
+    const rect = sel.getRangeAt(0).getBoundingClientRect();
+    if (!rect || (!rect.width && !rect.height)) { hide(); return; }
+    if (!btn) { btn = document.createElement('button'); btn.className = 'sel-send'; document.body.appendChild(btn); }
+    btn.innerHTML = `${ic('term', 'currentColor', 13)} 发到终端`;
+    const top = Math.min(window.innerHeight - 44, rect.bottom + 8);
+    btn.style.top = top + 'px';
+    btn.style.left = Math.max(8, Math.min(window.innerWidth - 130, rect.left)) + 'px';
+    btn.onmousedown = (ev) => ev.preventDefault(); // 别让点击清掉选区
+    btn.onclick = () => { const r = btn.getBoundingClientRect(); flingToTerminal(text, r); term.sendContext(text, state.selected); hide(); toast('已甩进终端，补一句要求再回车'); };
+  };
+  body.addEventListener('mouseup', () => setTimeout(show, 10));
+  body.addEventListener('scroll', hide, true);
+  document.addEventListener('mousedown', (ev) => { if (btn && ev.target !== btn && !btn.contains(ev.target)) hide(); });
+}
+// 给「无可见文字」的图标按钮挂即时气泡标签：把原生 title 转成 data-tip（CSS 气泡），移除 title 防双重提示
+function enableTooltips(scope) {
+  (scope || document).querySelectorAll('[title]').forEach((el) => {
+    const label = el.getAttribute('title');
+    if (!label) return;
+    if (el.textContent.replace(/\s/g, '').length > 2) return; // 有明确文字标签的按钮就不加气泡
+    el.dataset.tip = label;
+    el.removeAttribute('title');
+  });
+}
+// 侧边栏右缘拖拽改宽度（折叠态不可拖）
+function bindSidebarResizer() {
+  const handle = $('#sidebar-resizer');
+  if (!handle) return;
+  let dragging = false, raf = null, target = null;
+  const apply = () => { raf = null; if (target == null) return; state.sidebarW = target; target = null; applyLayout(); if (typeof term !== 'undefined') term.fitActive(); };
+  handle.addEventListener('mousedown', (e) => {
+    if (state.sidebarCollapsed) return;
+    dragging = true; e.preventDefault();
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none'; document.body.style.cursor = 'col-resize';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    target = Math.round(Math.min(420, Math.max(190, e.clientX)));
+    if (!raf) raf = requestAnimationFrame(apply);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false; handle.classList.remove('dragging');
+    document.body.style.userSelect = ''; document.body.style.cursor = '';
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    apply();
+    localStorage.setItem('fb_sidebar_w', state.sidebarW);
+  });
 }
 // 预览尺寸随 dock 翻转：终端在右→预览在下方用高度，否则用宽度
 function applyPreviewSize() {
@@ -519,6 +770,7 @@ function toggleSidebar(force) {
 // ---------- 图片基础编辑（canvas：标注/打码/转格式/缩放/压缩，原生保存）----------
 let imgEditState = null;
 async function enterImageEdit(e) {
+  if (!await guardDirty()) return;
   recordRecent(e.path);
   mona.disposeIfAny(); crepe.disposeIfAny();
   showPreviewPanel();
@@ -535,7 +787,7 @@ async function enterImageEdit(e) {
     buildImageEditor(e, img);
   };
   img.onerror = () => { toast('图片加载失败', true); openPreview(e); };
-  img.src = '/api/raw?path=' + encodeURIComponent(e.path);
+  img.src = '/api/raw?path=' + encodeURIComponent(e.path) + '&v=' + (e.mtime || 0);
 }
 function ieSnapshot(st) { const c = document.createElement('canvas'); c.width = st.canvas.width; c.height = st.canvas.height; c.getContext('2d').drawImage(st.canvas, 0, 0); return c; }
 function iePos(st, ev) { const r = st.canvas.getBoundingClientRect(); return { x: (ev.clientX - r.left) * (st.canvas.width / r.width), y: (ev.clientY - r.top) * (st.canvas.height / r.height) }; }
@@ -600,8 +852,10 @@ function buildImageEditor(e, img) {
   // 粗细随图分辨率自适应：大图默认更粗，才「看得出」；滑块上限也按图放大
   const defSize = Math.max(3, Math.round(img.naturalWidth / 250));
   const maxSize = Math.max(40, Math.round(img.naturalWidth / 30));
-  const st = { e, img, canvas, ctx, tool: 'pen', color: '#ff3b30', size: defSize, undo: [], base: null, dragging: false, sx: 0, sy: 0, lastX: 0, lastY: 0, origExt };
+  const st = { e, img, canvas, ctx, tool: 'pen', color: '#ff3b30', size: defSize, undo: [], base: null, dragging: false, sx: 0, sy: 0, lastX: 0, lastY: 0, origExt, dirty: false };
   imgEditState = st;
+  // 未保存守卫：图片一旦落过笔（dirty）就拦住离开，避免 Esc/✕ 静默清空画布
+  dirtyCheck = () => !!imgEditState && imgEditState.dirty;
   const sizeInput = $('#ie-size'); sizeInput.max = String(maxSize); sizeInput.value = String(defSize);
   const fmtSel = $('#ie-format');
   fmtSel.value = ['jpg', 'jpeg'].includes(origExt) ? 'jpeg' : (origExt === 'webp' ? 'webp' : 'png');
@@ -628,6 +882,7 @@ function bindImageEditor(st, toggleQ) {
       const c = st.ctx; c.save(); c.fillStyle = st.color; c.textBaseline = 'top';
       c.font = `600 ${Math.max(14, st.size * 6)}px ${getComputedStyle(document.documentElement).getPropertyValue('--font-ui')}`;
       c.fillText(txt, x, y); c.restore();
+      st.dirty = true;
       return;
     }
     st.base = ieSnapshot(st); st.dragging = true; st.sx = x; st.sy = y; st.lastX = x; st.lastY = y;
@@ -656,6 +911,7 @@ function bindImageEditor(st, toggleQ) {
       else ieDrawShape(st, st.sx, st.sy, x, y);
     }
     st.undo.push(st.base); if (st.undo.length > 25) st.undo.shift();
+    st.dirty = true;
   });
   $('#ie-save').onclick = () => ieSave(st, false);
   $('#ie-saveas').onclick = () => ieSave(st, true);
@@ -742,6 +998,7 @@ async function refresh() {
 }
 // 文本原地编辑：md → Milkdown Crepe 所见即所得；其它 → Monaco；都失败回退 textarea
 async function enterEditMode(e) {
+  if (!await guardDirty()) return;
   mona.disposeIfAny();
   crepe.disposeIfAny();
   showPreviewPanel();
@@ -761,6 +1018,7 @@ async function enterEditMode(e) {
       const ok = await confirmDialog('有未保存的改动，放弃并退出？（保存请点取消后按 ⌘S）');
       if (!ok) return;
     }
+    dirtyCheck = null; // 已在此确认过，避免 openPreview 的守卫再问一次
     mona.disposeIfAny(); crepe.disposeIfAny(); openPreview(e);
   };
   const save = async (force) => {
@@ -776,6 +1034,8 @@ async function enterEditMode(e) {
     toast('已保存');
     refresh(); // 后台刷新文件区，不打断编辑（⌘S 留在编辑器里）
   };
+  // 挂上未保存守卫：离开编辑器（切文件/跳目录/关预览）前比对当前值与已保存基准
+  dirtyCheck = () => !!getValue && getValue() !== baseline;
 
   const isMd = ex === 'md' || ex === 'markdown';
   const C = isMd ? await crepe.load() : null;
@@ -996,29 +1256,19 @@ function renderRecentOpened() {
 }
 
 // ---------- 最近修改 ----------
+// 结果写进统一数据源 state.entries，交给 renderFiles 渲染——这样筛选 / 排序 / 隐藏开关
+// 都能直接作用在最近列表上，不会把视图无声切回上一个目录
 async function showRecent() {
   state.recentMode = true;
-  state.cols = 1;
+  state.filter = '';
   state.cursor = -1;
+  $('#quick-filter').value = '';
   $('#file-area').innerHTML = '<div class="cmdk-loading">扫描最近修改的文件…</div>';
   renderBreadcrumb();
   const data = await api('/api/recent?root=' + encodeURIComponent(state.cwd || state.home));
-  const wrap = document.createElement('div');
-  wrap.className = 'list';
-  const head = document.createElement('div');
-  head.className = 'row list-head';
-  head.innerHTML = `<div></div><div>名称</div><div>修改时间</div><div>大小</div><div></div>`;
-  wrap.appendChild(head);
-  state.visible = data.results;
-  data.results.forEach((e, i) => {
-    const row = listRow(e, i);
-    row.querySelector('.fname').innerHTML = `${escapeHtml(e.name)} <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>`;
-    wrap.appendChild(row);
-  });
-  const area = $('#file-area');
-  area.innerHTML = '';
-  if (!data.results.length) area.innerHTML = `<div class="empty-state"><div class="big">${ic('clock', 'currentColor', 48)}</div>没找到最近修改的文件</div>`;
-  else { area.appendChild(wrap); highlightCursor(); if (data.truncated) area.insertAdjacentHTML('beforeend', truncNote()); }
+  state.entries = (data.results || []).map((e) => ({ ...e, hidden: false }));
+  state.recentTruncated = !!data.truncated;
+  renderFiles();
 }
 function truncNote() {
   return `<div class="trunc-note">⚠ 文件太多，结果可能不完整。进入更具体的子目录可看到全部。</div>`;
@@ -1033,7 +1283,7 @@ const cmdk = {
     const inp = $('#cmdk-input');
     inp.value = '';
     inp.focus();
-    $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索 · 文件名模糊匹配，「内容:」搜全文</div>';
+    $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索 · 文件名模糊匹配，「内容:」搜全文（含 PDF、截图里的文字）</div>';
     this.results = [];
     this.active = 0;
   },
@@ -1055,7 +1305,7 @@ const cmdk = {
       let data, term;
       if (isContent) {
         term = q.replace(/^(内容[:：]|content:)/i, '').trim();
-        data = await api(`/api/grep?q=${encodeURIComponent(term)}&root=${encodeURIComponent(root)}`);
+        data = await api(`/api/content?q=${encodeURIComponent(term)}&root=${encodeURIComponent(root)}`);
         this.results = data.results.map((r) => ({ ...r, content: true }));
       } else {
         term = q.trim();
@@ -1149,7 +1399,7 @@ function maybeShowGuide() {
 function bindResizer() {
   const handle = $('#preview-resizer');
   let dragging = false;
-  handle.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); document.body.style.userSelect = 'none'; });
+  handle.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); handle.classList.add('dragging'); document.body.style.userSelect = 'none'; });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
     const fm = $('#filemgmt').getBoundingClientRect();
@@ -1162,35 +1412,64 @@ function bindResizer() {
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
-    dragging = false; document.body.style.userSelect = '';
+    dragging = false; handle.classList.remove('dragging'); document.body.style.userSelect = '';
     localStorage.setItem('fb_preview_w', state.previewW);
     localStorage.setItem('fb_preview_h', state.previewH || 340);
   });
 }
 
 // 终端面板拖拽调整大小（底部拖高度 / 右侧拖宽度）
+// 丝滑要点：mousemove 只记目标值，用 rAF 每帧最多应用一次（含一次 fit），不再每个事件都 fit 触发重排
 function bindTerminalResizer() {
   const handle = $('#terminal-resizer');
-  let dragging = false;
-  handle.addEventListener('mousedown', (e) => { dragging = true; e.preventDefault(); document.body.style.userSelect = 'none'; });
+  let dragging = false, raf = null, target = null, squeeze = false;
+  const SNAP = 48; // 拖到离边缘 48px 内 → 吸附成全铺（fm-squeezed），不再留丑陋的残条
+  const fitNow = () => { const s = term.sessions.find((x) => x.id === term.active); if (s && s.fit) { try { s.fit.fit(); } catch { /* */ } } };
+  const apply = () => {
+    raf = null;
+    if (target == null) return;
+    const panel = $('#terminal-panel');
+    $('#main-body').classList.toggle('fm-squeezed', squeeze);
+    if (term.dock === 'bottom') panel.style.height = target + 'px';
+    else panel.style.width = target + 'px';
+    target = null;
+    fitNow();
+  };
+  handle.addEventListener('mousedown', (e) => {
+    dragging = true; e.preventDefault();
+    // 铺满态下抓分割条 = 想拖回分屏，直接退出铺满（不走 toggleMax，拖拽中不要过渡动画）
+    if (term.maximized) {
+      term.maximized = false;
+      $('#main-body').classList.remove('term-max');
+      const b = $('#term-max'); if (b) { b.classList.remove('on'); b.title = '终端铺满'; }
+    }
+    squeeze = $('#main-body').classList.contains('fm-squeezed');
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = term.dock === 'bottom' ? 'row-resize' : 'col-resize';
+  });
   window.addEventListener('mousemove', (e) => {
     if (!dragging) return;
-    const panel = $('#terminal-panel');
     const rect = $('#main-body').getBoundingClientRect();
     if (term.dock === 'bottom') {
-      // 下限放宽到 8px：可把终端一路拖到铺满（文件区塌到 0，分隔条仍留在顶部可拖回）
-      const h = Math.min(rect.height - 8, Math.max(80, rect.bottom - e.clientY));
-      panel.style.height = Math.round(h) + 'px';
+      const raw = rect.bottom - e.clientY;
+      squeeze = raw >= rect.height - SNAP;
+      target = Math.round(Math.min(rect.height - 4, Math.max(60, raw)));
     } else {
-      const w = Math.min(rect.width - 8, Math.max(160, rect.right - e.clientX));
-      panel.style.width = Math.round(w) + 'px';
+      const raw = rect.right - e.clientX;
+      squeeze = raw >= rect.width - SNAP;
+      target = Math.round(Math.min(rect.width - 4, Math.max(140, raw)));
     }
-    term.fitActive();
+    if (!raf) raf = requestAnimationFrame(apply);
   });
   window.addEventListener('mouseup', () => {
     if (!dragging) return;
-    dragging = false; document.body.style.userSelect = '';
+    dragging = false; handle.classList.remove('dragging');
+    document.body.style.userSelect = ''; document.body.style.cursor = '';
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    apply(); fitNow();
     const panel = $('#terminal-panel');
+    localStorage.setItem('fb_term_squeeze', squeeze ? '1' : '0');
     if (term.dock === 'bottom') localStorage.setItem('fb_term_h', parseInt(panel.style.height, 10) || 280);
     else localStorage.setItem('fb_term_w', parseInt(panel.style.width, 10) || 480);
   });
@@ -1203,10 +1482,17 @@ function bindEvents() {
   $('#preview-close').onclick = closePreview;
   $('#cmdk-trigger').onclick = () => cmdk.open();
   $('#btn-recent').onclick = showRecent;
+  $('#btn-changes').onclick = () => toggleChangesPanel();
   $('#btn-terminal').onclick = () => term.toggle();
+  $('#term-claude').onclick = () => term.launchAgent('claude');
+  $('#term-codex').onclick = () => term.launchAgent('codex');
   $('#term-newtab').onclick = () => term.newTab();
   $('#term-max').onclick = () => term.toggleMax();
   $('#term-dock').onclick = () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom');
+  const muteBtn = $('#term-mute');
+  const syncMute = () => { muteBtn.textContent = state.muted ? '🔕' : '🔔'; muteBtn.title = state.muted ? '提示音已关（点击开启）' : '提示音已开（点击静音）'; };
+  syncMute();
+  muteBtn.onclick = () => { state.muted = !state.muted; localStorage.setItem('fb_muted', state.muted ? '1' : '0'); syncMute(); if (!state.muted) playChime('tick'); };
   $('#term-close').onclick = () => term.close();
   $('#btn-sidebar').onclick = () => toggleSidebar();
   $('#term-follow').onclick = () => term.setFollow(!term.followBrowse);
@@ -1219,15 +1505,32 @@ function bindEvents() {
   // 拖拽文件/文件夹到终端 → 插入路径
   const tp = $('#terminal-panel');
   tp.addEventListener('dragover', (ev) => {
-    if (!ev.dataTransfer.types.includes('application/x-fanbox-path') && !ev.dataTransfer.types.includes('text/plain')) return;
+    const t = ev.dataTransfer.types;
+    if (!t.includes('Files') && !t.includes('application/x-fanbox-path') && !t.includes('text/plain')) return;
     ev.preventDefault(); ev.dataTransfer.dropEffect = 'copy'; tp.classList.add('term-drop');
   });
   tp.addEventListener('dragleave', (ev) => { if (!tp.contains(ev.relatedTarget)) tp.classList.remove('term-drop'); });
-  tp.addEventListener('drop', (ev) => {
+  tp.addEventListener('drop', async (ev) => {
     ev.preventDefault(); tp.classList.remove('term-drop');
+    // 系统拖入（Finder 文件 / 截图浮窗缩略图）：有真实路径直接用；file-promise 没路径就落盘临时目录
+    const files = ev.dataTransfer.files ? [...ev.dataTransfer.files] : [];
+    if (files.length && window.fanboxDrop) {
+      for (const f of files) {
+        let p = window.fanboxDrop.pathForFile(f);
+        if (!p) {
+          const r = await window.fanboxDrop.saveTemp(f.name, await f.arrayBuffer()).catch(() => null);
+          if (r && r.ok) p = r.path;
+        }
+        if (p) term.insertPath(p);
+      }
+      return;
+    }
     const p = ev.dataTransfer.getData('application/x-fanbox-path') || ev.dataTransfer.getData('text/plain');
     if (p) term.insertPath(p);
   });
+  // 全局兜底：文件拖到窗口其它区域松手时，阻止 Electron 导航到 file:// 顶掉整个界面
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', (e) => e.preventDefault());
   $('#btn-new-dir').onclick = () => doCreate('dir');
   $('#btn-new-file').onclick = () => doCreate('file');
   document.addEventListener('click', (e) => { if (!e.target.closest('#context-menu')) closeContextMenu(); });
@@ -1271,6 +1574,13 @@ function bindEvents() {
     if (lbOpen) { if (e.key === 'Escape') document.querySelector('.lightbox').remove(); return; }
     if (imgEditState && (e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) { e.preventDefault(); ieUndo(imgEditState); return; }
     const inInput = ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable;
+    // 输入框里按 Esc 先退出输入（筛选框还会清空内容），别越级把预览关掉
+    if (e.key === 'Escape' && inInput) {
+      const el = document.activeElement;
+      if (el.id === 'quick-filter' && el.value) { el.value = ''; state.filter = ''; state.cursor = -1; renderFiles(); }
+      el.blur();
+      return;
+    }
     if (e.key === 'Escape' && !$('#preview').classList.contains('hidden')) { closePreview(); return; }
     if (e.key === '/' && !inInput) { e.preventDefault(); $('#quick-filter').focus(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === '[') { e.preventDefault(); goBack(); return; }
@@ -1282,7 +1592,10 @@ function bindEvents() {
     else if (e.key === 'ArrowRight') { e.preventDefault(); moveCursor(1); }
     else if (e.key === 'ArrowLeft') { e.preventDefault(); moveCursor(-1); }
     else if (e.key === 'Enter') { e.preventDefault(); cursorEnter(e.metaKey || e.ctrlKey); }
+    else if ((e.metaKey || e.ctrlKey) && (e.key === 'Backspace' || e.key === 'Delete')) { e.preventDefault(); const it = state.visible[state.cursor]; if (it) doTrash(it); }
     else if (e.key === 'Backspace') { e.preventDefault(); goUp(); }
+    else if (e.key === ' ') { e.preventDefault(); const it = state.visible[state.cursor]; if (it) toggleFav(it); }
+    else if (e.key === 'F2') { e.preventDefault(); const it = state.visible[state.cursor]; if (it) doRename(it); }
   });
 }
 function updateGridSizeVisibility() {
@@ -1296,7 +1609,7 @@ function applyTheme(skin, rerender = true) {
   document.documentElement.dataset.theme = skin;
   localStorage.setItem('fb_theme', skin);
   const link = document.getElementById('hljs-theme');
-  if (link) link.href = 'https://cdn.jsdelivr.net/npm/highlight.js@11/styles/' + (skin === 'terminal' ? 'github-dark' : 'github') + '.min.css';
+  if (link) link.href = '/vendor/hljs/styles/' + (skin === 'terminal' ? 'github-dark' : 'github') + '.min.css';
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => b.classList.toggle('active', b.dataset.skin === skin));
   if (typeof term !== 'undefined' && term.sessions.length) term.retheme();
   if (typeof mona !== 'undefined') mona.retheme();
@@ -1351,8 +1664,10 @@ const term = {
     if (!localStorage.getItem('fb_term_draghint')) { localStorage.setItem('fb_term_draghint', '1'); setTimeout(() => toast('提示：把左侧文件 / 文件夹拖进终端，即插入路径喂给 agent'), 700); }
   },
   close() {
+    if (this.maximized) this.toggleMax(false); // 铺满状态下收起终端，term-max 不清会把文件区一起藏没
     $('#terminal-panel').classList.add('hidden');
     $('#terminal-resizer').classList.add('hidden');
+    $('#main-body').classList.remove('fm-squeezed'); // 终端收起后文件区必须回来
     $('#btn-terminal').classList.remove('active');
     localStorage.setItem('fb_term_open', '0');
   },
@@ -1360,13 +1675,19 @@ const term = {
     const mb = $('#main-body');
     mb.classList.toggle('dock-bottom', this.dock === 'bottom');
     mb.classList.toggle('dock-right', this.dock === 'right');
+    // 全铺状态只在终端可见时恢复，否则文件区会凭空消失
+    const termOpen = !$('#terminal-panel').classList.contains('hidden');
+    mb.classList.toggle('fm-squeezed', termOpen && localStorage.getItem('fb_term_squeeze') === '1');
     const panel = $('#terminal-panel');
     if (this.dock === 'bottom') { panel.style.height = (Number(localStorage.getItem('fb_term_h')) || 280) + 'px'; panel.style.width = ''; }
     else { panel.style.width = (Number(localStorage.getItem('fb_term_w')) || 480) + 'px'; panel.style.height = ''; }
     applyPreviewSize(); // 预览随 dock 翻转轴向
     this.fitActive();
   },
-  setDock(d) { animateLayout(); this.dock = d; localStorage.setItem('fb_term_dock', d); this.applyDock(); },
+  setDock(d) {
+    if (this.maximized) this.toggleMax(false); // 铺满下切布局看不出任何变化，先退出铺满让分屏可见
+    animateLayout(); this.dock = d; localStorage.setItem('fb_term_dock', d); this.applyDock();
+  },
   // 终端最大化：铺满整个中区（文件区让位），再点还原
   toggleMax(force) {
     animateLayout();
@@ -1392,6 +1713,32 @@ const term = {
     if (wasHidden) this.open();
     const write = () => { if (this.active) window.fanboxPty.input(this.active, shQuote(p) + ' '); const s = this.sessions.find((x) => x.id === this.active); if (s) s.xterm.focus(); };
     if (wasHidden) setTimeout(write, 280); else write();
+  },
+  // 一键在活动终端启动 coding agent（终端没开就先开、没标签就建一个）
+  launchAgent(cmd) {
+    if (!this.available()) { openWith(state.cwd, 'terminal'); return; } // 网页版降级到系统终端
+    const wasHidden = $('#terminal-panel').classList.contains('hidden');
+    if (wasHidden) this.open();
+    if (!this.sessions.length) this.newTab();
+    const run = () => { if (this.active) { window.fanboxPty.input(this.active, cmd + '\r'); const s = this.sessions.find((x) => x.id === this.active); if (s) s.xterm.focus(); } };
+    setTimeout(run, wasHidden || !this.sessions.length ? 340 : 0);
+    toast('已在终端启动 ' + cmd);
+  },
+  // 把预览里选中的文字作为「上下文」喂给终端 agent：带文件出处 + 围栏，bracketed paste 防逐行误提交
+  sendContext(text, srcPath) {
+    if (!this.available()) { toast('内嵌终端不可用（网页版没有终端）', true); return; }
+    const wasHidden = $('#terminal-panel').classList.contains('hidden');
+    if (wasHidden) this.open();
+    const rel = srcPath ? srcPath.replace(state.home, '~') : '';
+    const head = rel ? `（来自 ${rel} 的片段）` : '（选中的片段）';
+    const block = `${head}\n\`\`\`\n${text}\n\`\`\`\n`;
+    const write = () => {
+      if (!this.active) return;
+      // \x1b[200~ … \x1b[201~ 是 bracketed paste：多行内容当作一次粘贴，不会被 shell/TUI agent 逐行执行
+      window.fanboxPty.input(this.active, '\x1b[200~' + block + '\x1b[201~');
+      const s = this.sessions.find((x) => x.id === this.active); if (s) s.xterm.focus();
+    };
+    if (wasHidden) setTimeout(write, 300); else write();
   },
   // 点终端里的文件名/路径 → 结合 cwd + 搜索定位真实文件，在翻箱里打开
   async openTermPath(id, raw) {
@@ -1441,6 +1788,9 @@ const term = {
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace',
       fontSize: 13, lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
       allowProposedApi: true, // unicode11 宽度 API 需要
+      // agent 常输出按深色终端设计的 256 色/真彩（如淡蓝路径），在浅色皮肤上几乎隐形；
+      // 自动把对比度不足的前景色压暗/提亮到 4.5:1（WCAG AA，VS Code 终端同款默认值）
+      minimumContrastRatio: 4.5,
     });
     const fit = FitCtor ? new FitCtor() : null;
     if (fit) xterm.loadAddon(fit);
@@ -1459,9 +1809,10 @@ const term = {
       } catch { /* 回退默认 DOM renderer */ }
     }
     if (fit) try { fit.fit(); } catch { /* */ }
-    const sess = { id, xterm, fit, host, dead: false, startDir, title: baseOf(startDir || '') || 'shell' };
+    const sess = { id, xterm, fit, host, dead: false, status: 'idle', unread: false, startDir, title: baseOf(startDir || '') || 'shell' };
     this.sessions.push(sess);
     this.activate(id);
+    updateWatches(); // 新终端的项目目录也纳入监听
     const r = await window.fanboxPty.spawn({ id, cwd: startDir, cols: xterm.cols, rows: xterm.rows });
     if (!r.ok) { xterm.write('\r\n  \x1b[31m终端启动失败：' + (r.error || '') + '\x1b[0m\r\n'); }
     xterm.onData((d) => {
@@ -1503,6 +1854,8 @@ const term = {
   activate(id) {
     this.active = id;
     this.sessions.forEach((s) => s.host.classList.toggle('show', s.id === id));
+    const cur = this.sessions.find((x) => x.id === id);
+    if (cur) cur.unread = false; // 切到该标签即清未读
     this.renderTabs();
     const s = this.sessions.find((x) => x.id === id);
     if (s) { this.fitActive(); setTimeout(() => s.xterm.focus(), 0); }
@@ -1515,6 +1868,7 @@ const term = {
     try { s.xterm.dispose(); } catch { /* */ }
     s.host.remove();
     this.sessions.splice(i, 1);
+    updateWatches(); // 该终端的项目目录不再需要监听
     if (!this.sessions.length) { this.close(); return; }
     if (this.active === id) this.activate(this.sessions[Math.max(0, i - 1)].id);
     else this.renderTabs();
@@ -1524,13 +1878,61 @@ const term = {
     if (!s || !s.fit) return;
     requestAnimationFrame(() => { try { s.fit.fit(); } catch { /* */ } });
   },
+  // agent 态势感知：终端有输出→busy；静默 >1.2s→idle；进程退出→dead。
+  // 非活动标签产生输出标记未读小点；长任务（busy>4s）完成且窗口失焦/非当前标签时发系统通知。
+  markBusy(s) {
+    s.lastData = Date.now();
+    if (s.status !== 'busy') { s.status = 'busy'; s.busyStart = s.lastData; this.renderTabs(); }
+    if (s.id !== this.active) { if (!s.unread) { s.unread = true; this.renderTabs(); } }
+    $('#terminal-panel').classList.remove('term-awaiting'); // 又有输出了，撤掉「轮到你」呼吸
+    this.ensureStatusTick();
+  },
+  // 轮到你了：终端边缘呼吸几秒，余光可感（agent 干完一段、把球踢回给你）
+  awaitGlow() {
+    const p = $('#terminal-panel');
+    if (!p || p.classList.contains('hidden')) return;
+    p.classList.add('term-awaiting');
+    clearTimeout(this._awaitT);
+    this._awaitT = setTimeout(() => p.classList.remove('term-awaiting'), 6500);
+  },
+  ensureStatusTick() {
+    if (this._statusTimer) return;
+    this._statusTimer = setInterval(() => {
+      const now = Date.now(); let anyBusy = false;
+      this.sessions.forEach((s) => {
+        if (s.status === 'busy') {
+          if (now - (s.lastData || 0) > 1200) {
+            const dur = (s.lastData || 0) - (s.busyStart || 0);
+            s.status = 'idle';
+            this.renderTabs();
+            if (dur > 1500) this.awaitGlow(); // 非琐碎回显才提示「轮到你」
+            if (dur > 4000) { // 跑了一会儿的真任务完成：文件区涟漪 + 极轻提示音 + 必要时系统通知
+              rippleFileArea();
+              playChime('done');
+              if (!document.hasFocus() || s.id !== this.active) this.notify(s, 'agent 任务完成', (s.title || 'shell') + ' 已空闲');
+            }
+          } else anyBusy = true;
+        }
+      });
+      if (!anyBusy) { clearInterval(this._statusTimer); this._statusTimer = null; }
+    }, 600);
+  },
+  notify(s, title, body) {
+    try {
+      if (typeof Notification === 'undefined') return;
+      if (Notification.permission === 'granted') { new Notification(title, { body }); }
+      else if (Notification.permission !== 'denied') { Notification.requestPermission().then((p) => { if (p === 'granted') new Notification(title, { body }); }); }
+    } catch { /* 通知不可用就算了 */ }
+  },
   renderTabs() {
     const bar = $('#term-tabs');
     bar.innerHTML = '';
     this.sessions.forEach((s) => {
       const t = document.createElement('div');
-      t.className = 'term-tab' + (s.id === this.active ? ' active' : '');
-      t.innerHTML = `${ic('term', 'currentColor', 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
+      const dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
+      t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '');
+      const dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
+      t.innerHTML = `<span class="tab-dot ${dotState}" title="${dotTitle}"></span>${ic('term', 'currentColor', 12)}<span>${escapeHtml(s.title)}</span><span class="tab-x" title="关闭">✕</span>`;
       t.onclick = (e) => { if (e.target.classList.contains('tab-x')) { this.closeTab(s.id); return; } this.activate(s.id); };
       bar.appendChild(t);
     });
@@ -1588,7 +1990,26 @@ const mona = {
     m.editor.defineTheme('fb-editorial', { base: 'vs', inherit: true, rules: [], colors: { 'editor.background': '#eae5d8', 'editor.foreground': '#1a1a1a', 'editorLineNumber.foreground': '#9a958a', 'editorCursor.foreground': '#ff433d', 'editor.selectionBackground': '#ff433d22', 'editor.lineHighlightBackground': '#00000008' } });
   },
   retheme() { if (this.editor && window.monaco) window.monaco.editor.setTheme(this.themeName()); },
-  disposeIfAny() { if (this.editor) { try { this.editor.dispose(); } catch { /* */ } this.editor = null; } },
+  // 只读并排 diff：HEAD 版本 vs 工作区当前内容，复用 editor 槽位让 disposeIfAny 统一回收
+  openDiff(host, original, modified, ex) {
+    const monaco = window.monaco;
+    const lang = this.lang(ex);
+    const orig = monaco.editor.createModel(original || '', lang);
+    const mod = monaco.editor.createModel(modified || '', lang);
+    const de = monaco.editor.createDiffEditor(host, {
+      theme: this.themeName(), readOnly: true, automaticLayout: true, renderSideBySide: true,
+      fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-mono').trim() || 'monospace',
+      fontSize: 12.5, lineHeight: 1.6, minimap: { enabled: false }, scrollBeyondLastLine: false,
+    });
+    de.setModel({ original: orig, modified: mod });
+    this._models = [orig, mod];
+    this.editor = de;
+    return de;
+  },
+  disposeIfAny() {
+    if (this.editor) { try { this.editor.dispose(); } catch { /* */ } this.editor = null; }
+    if (this._models) { this._models.forEach((m) => { try { m.dispose(); } catch { /* */ } }); this._models = null; }
+  },
 };
 
 // ---------- Milkdown Crepe（Notion 式所见即所得 Markdown；本地 vendor，离线可用）----------
@@ -1611,10 +2032,214 @@ const crepe = {
   disposeIfAny() { if (this.editor) { try { this.editor.destroy(); } catch { /* */ } this.editor = null; } },
 };
 
+// ---------- 变更收件箱（本会话 agent 改了哪些文件，可回看 / 看 diff）----------
+// 构建/依赖目录 + macOS 系统噪声目录（Library/缓存/废纸篓 后台无时无刻在写，不是 agent 干活，必须过滤）
+const CHANGE_IGNORE = new Set(['.git', 'node_modules', '.next', 'dist', 'build', '.cache', '.venv', 'venv', '__pycache__', '.DS_Store', 'target', '.turbo', '.expo', 'Library', 'Caches', '.Trash', 'CloudStorage', '.cocoapods', 'DerivedData']);
+// 这次变更是不是该被忽略的系统/构建噪声（高亮、刷新、收件箱共用一套判断）
+function isNoisyChange(filename) {
+  const segs = String(filename).split('/');
+  if (segs.some((s) => CHANGE_IGNORE.has(s))) return true;
+  const name = segs[segs.length - 1];
+  return !name || name === '.DS_Store' || name.endsWith('~') || name.endsWith('.swp') || name.startsWith('.com.apple.');
+}
+function recordChange(dir, filename) {
+  if (isNoisyChange(filename)) return; // 过滤构建/依赖/系统噪声
+  const segs = filename.split('/');
+  const name = segs[segs.length - 1];
+  const full = dir.replace(/\/$/, '') + '/' + filename;
+  const now = Date.now();
+  state.changeTimeline.push({ path: full, name, ts: now }); // 每次写入都记一笔，供会话回放
+  if (state.changeTimeline.length > 3000) state.changeTimeline.shift();
+  const existing = state.changeLog.find((c) => c.path === full);
+  if (existing) { existing.ts = now; existing.count++; }
+  else state.changeLog.unshift({ path: full, name, dir, ts: now, count: 1 });
+  // 最新置顶；已存在的移到队首
+  state.changeLog.sort((a, b) => b.ts - a.ts);
+  if (state.changeLog.length > 100) state.changeLog.length = 100;
+  renderChangesBadge();
+}
+function renderChangesBadge() {
+  const b = $('#changes-badge'); if (!b) return;
+  const n = state.changeLog.length;
+  b.textContent = String(n);
+  b.classList.toggle('hidden', n === 0);
+}
+function fmtClock(ms) { const d = new Date(ms); const p = (x) => String(x).padStart(2, '0'); return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`; }
+function toggleChangesPanel() {
+  const existing = $('#changes-pop');
+  if (existing) { existing.remove(); return; }
+  const pop = document.createElement('div');
+  pop.id = 'changes-pop';
+  pop.className = 'changes-pop';
+  if (!state.changeLog.length) {
+    pop.innerHTML = '<div class="cp-head">本会话变更</div><div class="cp-empty">还没有捕捉到文件变更。<br>跑起 agent，它改的文件会实时出现在这里。</div>';
+  } else {
+    const rows = state.changeLog.slice(0, 60).map((c) => {
+      const inRepoHint = '';
+      return `<div class="cp-row" data-path="${escapeHtml(c.path)}">
+        <span class="cp-name">${escapeHtml(c.name)}${c.count > 1 ? ` <em>×${c.count}</em>` : ''}</span>
+        <span class="cp-dir">${escapeHtml(c.dir.replace(state.home, '~'))}</span>
+        <span class="cp-time">${fmtClock(c.ts)}</span>
+      </div>`;
+    }).join('');
+    pop.innerHTML = `<div class="cp-head">本会话变更 · ${state.changeLog.length}<span class="cp-head-btns"><button id="cp-replay" class="ghost-btn">▶ 回放</button><button id="cp-clear" class="ghost-btn">清空</button></span></div><div class="cp-list">${rows}</div>`;
+  }
+  document.body.appendChild(pop);
+  const btn = $('#btn-changes'); const r = btn.getBoundingClientRect();
+  pop.style.top = (r.bottom + 6) + 'px';
+  pop.style.right = (window.innerWidth - r.right) + 'px';
+  const clear = $('#cp-clear'); if (clear) clear.onclick = (ev) => { ev.stopPropagation(); state.changeLog = []; state.changeTimeline = []; renderChangesBadge(); pop.remove(); };
+  const rep = $('#cp-replay'); if (rep) rep.onclick = (ev) => { ev.stopPropagation(); pop.remove(); openReplay(); };
+  pop.querySelectorAll('.cp-row').forEach((row) => {
+    row.onclick = async () => {
+      const p = row.dataset.path;
+      pop.remove();
+      await navigate(dirOf(p));
+      const e = state.entries.find((x) => x.path === p) || { path: p, name: baseOf(p), kind: kindFromName(p), isDir: false };
+      applySelection(p); openPreview(e); recordRecent(p);
+    };
+  });
+  // 点其它地方关闭
+  setTimeout(() => {
+    const close = (ev) => { if (!ev.target.closest('#changes-pop') && !ev.target.closest('#btn-changes')) { pop.remove(); document.removeEventListener('click', close); } };
+    document.addEventListener('click', close);
+  }, 0);
+}
+// WOW2 会话回放：像刷视频一样拖时间轴，重现这段时间 agent 一步步改了哪些文件
+function openReplay() {
+  const tl = state.changeTimeline.slice();
+  if (tl.length < 2) { toast('变更太少，先让 agent 多改几下再回放', true); return; }
+  const t0 = tl[0].ts, t1 = tl[tl.length - 1].ts;
+  const span = Math.max(1000, t1 - t0);
+  const ov = document.createElement('div');
+  ov.className = 'replay-ov';
+  ov.innerHTML =
+    `<div class="replay-panel">
+      <div class="replay-head"><span>会话回放 · ${tl.length} 次写入 · 跨 ${fmtDur(span)}</span><button class="replay-close ghost-btn">关闭 (Esc)</button></div>
+      <div class="replay-now"><span class="rn-label">此刻 agent 正在改</span><span class="rn-file" id="replay-now">—</span></div>
+      <div class="replay-track" id="replay-track"><div class="replay-fill" id="replay-fill"></div><div class="replay-playhead" id="replay-playhead"></div></div>
+      <div class="replay-ctl"><button id="replay-play" class="primary">▶ 播放</button><input type="range" id="replay-range" min="0" max="1000" value="1000"><span id="replay-count" class="replay-count"></span></div>
+      <div class="replay-list" id="replay-list"></div>
+    </div>`;
+  document.body.appendChild(ov);
+  const track = ov.querySelector('#replay-track');
+  tl.forEach((e) => { const t = document.createElement('i'); t.className = 'replay-tick'; t.style.left = ((e.ts - t0) / span * 100) + '%'; track.appendChild(t); });
+  const range = ov.querySelector('#replay-range');
+  const playBtn = ov.querySelector('#replay-play');
+  let raf = null, playing = false, startWall = 0, startFrac = 0;
+  const DURATION = Math.min(20000, Math.max(6000, span / 3)); // 把真实时长压缩到 6–20 秒
+  const render = (frac) => {
+    const at = t0 + span * frac;
+    let lastIdx = -1;
+    for (let i = 0; i < tl.length; i++) { if (tl[i].ts <= at) lastIdx = i; else break; }
+    const done = lastIdx + 1;
+    ov.querySelector('#replay-fill').style.width = (frac * 100) + '%';
+    ov.querySelector('#replay-playhead').style.left = (frac * 100) + '%';
+    ov.querySelector('#replay-now').textContent = lastIdx >= 0 ? tl[lastIdx].name : '—';
+    ov.querySelector('#replay-count').textContent = `${done}/${tl.length}`;
+    const recent = tl.slice(Math.max(0, lastIdx - 5), lastIdx + 1).reverse();
+    ov.querySelector('#replay-list').innerHTML = recent.map((e, i) => `<div class="rl-row${i === 0 ? ' rl-now' : ''}"><span>${escapeHtml(e.name)}</span><span class="rl-t">${fmtClock(e.ts)}</span></div>`).join('');
+  };
+  const stop = () => { playing = false; if (raf) cancelAnimationFrame(raf); raf = null; playBtn.textContent = '▶ 播放'; };
+  const step = () => {
+    const elapsed = perfNow() - startWall;
+    let frac = startFrac + elapsed / DURATION;
+    if (frac >= 1) { frac = 1; render(frac); range.value = 1000; stop(); playBtn.textContent = '↻ 重播'; return; }
+    range.value = String(Math.round(frac * 1000));
+    render(frac);
+    raf = requestAnimationFrame(step);
+  };
+  playBtn.onclick = () => {
+    if (playing) { stop(); return; }
+    let frac = Number(range.value) / 1000; if (frac >= 1) frac = 0;
+    startFrac = frac; startWall = perfNow(); playing = true; playBtn.textContent = '⏸ 暂停';
+    raf = requestAnimationFrame(step);
+  };
+  range.oninput = () => { stop(); render(Number(range.value) / 1000); };
+  const close = () => { stop(); ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+  ov.querySelector('.replay-close').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+  render(1); // 默认停在最终态
+}
+function fmtDur(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + ' 秒';
+  const m = Math.round(s / 60);
+  return m < 60 ? m + ' 分钟' : (m / 60).toFixed(1) + ' 小时';
+}
+function perfNow() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
+// 从文件名粗判类型（变更项可能不在当前 entries 里）
+function kindFromName(p) {
+  const e = (p.split('.').pop() || '').toLowerCase();
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif', 'tiff', 'tif'].includes(e)) return 'image';
+  if (['mp4', 'webm', 'mov', 'm4v'].includes(e)) return 'video';
+  if (e === 'pdf') return 'pdf';
+  return 'text';
+}
+
+// WOW4 环境感知：完成时文件区荡开一圈大涟漪 + 极轻提示音（Web Audio 当场合成，无需音频文件）
+function rippleFileArea() {
+  const host = $('#content') || $('#file-area');
+  if (!host) return;
+  const rect = host.getBoundingClientRect();
+  const r = document.createElement('div');
+  r.className = 'area-ripple';
+  r.style.left = (rect.left + rect.width / 2) + 'px';
+  r.style.top = (rect.top + rect.height / 2) + 'px';
+  document.body.appendChild(r);
+  r.addEventListener('animationend', () => r.remove(), { once: true });
+  setTimeout(() => r.remove(), 1400);
+}
+let _audioCtx = null;
+function playChime(type) {
+  if (state.muted) return;
+  try {
+    _audioCtx = _audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    const ctx = _audioCtx; const now = ctx.currentTime;
+    const notes = type === 'done' ? [659.25, 987.77] : [523.25]; // 完成是 E5→B5 上行小叮，其它单音
+    notes.forEach((f, i) => {
+      const o = ctx.createOscillator(); const g = ctx.createGain();
+      o.type = 'sine'; o.frequency.value = f;
+      o.connect(g); g.connect(ctx.destination);
+      const t = now + i * 0.11;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.11, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.4);
+      o.start(t); o.stop(t + 0.45);
+    });
+  } catch { /* 音频不可用就算了 */ }
+}
+
+// WOW1 活的仪表盘：每次写入，让对应文件卡片当场荡开涟漪 + 弹一下 + 按热度发光，agent 写到哪光走到哪
+function igniteCard(top, count) {
+  const area = $('#file-area');
+  if (!area || !state.cwd) return;
+  const path = state.cwd.replace(/\/$/, '') + state.sep + top;
+  const el = area.querySelector(`[data-path="${CSS.escape(path)}"]`);
+  if (!el) return; // 卡片还没渲染（新文件首次出现），等 refresh 后由 renderFiles 接管发光
+  el.style.setProperty('--heat', Math.min(1, 0.4 + count * 0.12).toFixed(2));
+  el.classList.remove('live-edit'); void el.offsetWidth; el.classList.add('live-edit'); // 重新触发弹跳
+  const host = el.querySelector('.icon') || el;
+  const ripple = document.createElement('span');
+  ripple.className = 'edit-ripple';
+  host.appendChild(ripple);
+  ripple.addEventListener('animationend', () => ripple.remove(), { once: true });
+}
+
 // pty 数据回流（全局一次）
 if (window.fanboxPty) {
-  window.fanboxPty.onData(({ id, data }) => { const s = term.sessions.find((x) => x.id === id); if (s) s.xterm.write(data); });
-  window.fanboxPty.onExit(({ id }) => { const s = term.sessions.find((x) => x.id === id); if (s) { s.dead = true; s.xterm.write('\r\n\x1b[90m[进程已退出 — 回车重开，或 ✕ 关闭]\x1b[0m\r\n'); } });
+  window.fanboxPty.onData(({ id, data }) => { const s = term.sessions.find((x) => x.id === id); if (s) { s.xterm.write(data); term.markBusy(s); } });
+  window.fanboxPty.onExit(({ id }) => {
+    const s = term.sessions.find((x) => x.id === id);
+    if (s) {
+      s.dead = true; s.status = 'dead';
+      s.xterm.write('\r\n\x1b[90m[进程已退出 — 回车重开，或 ✕ 关闭]\x1b[0m\r\n');
+      term.renderTabs();
+      term.notify(s, '终端已退出', (s.title || 'shell') + ' 的进程结束了');
+    }
+  });
 }
 // 文件变化 → 自动刷新列表（看着 agent 干活）；编辑中不动预览，避免吞掉未保存内容
 if (window.fanboxFs) {
@@ -1631,6 +2256,11 @@ if (window.fanboxFs) {
     }, 1000); // 单一清理定时器，避免大批量变更时堆积成千上万个 timer
   };
   window.fanboxFs.onChanged(({ dir, filename }) => {
+    // 系统/构建噪声（~/Library 缓存、node_modules 等 macOS 后台不停写）直接丢弃：
+    // 既不点亮卡片、不进收件箱，也不触发列表刷新——否则 Library 会永远显示「被修改」
+    if (filename && isNoisyChange(filename)) return;
+    // 记进会话级收件箱（跨所有监听目录，不止当前目录），供「变更」面板回看
+    if (filename) recordChange(dir, String(filename));
     if (dir !== state.cwd || state.recentMode) return;
     // 高亮被 agent 改动的项：递归监听下 src/foo.js 归到顶层 src，并累计计数 + 记子路径供 tooltip 定位
     if (filename) {
@@ -1641,6 +2271,7 @@ if (window.fanboxFs) {
       rec.count++; rec.ts = Date.now();
       if (rec.files.size < 8 && sub !== top) rec.files.add(sub);
       scheduleSweep();
+      igniteCard(top, rec.count); // 当场点亮这张卡（不等 250ms 刷新）
     }
     clearTimeout(rt);
     rt = setTimeout(async () => {
@@ -1663,6 +2294,9 @@ async function init() {
   term.applyDock(); // 初始就给 #main-body 设好 dock 类，决定预览/文件管理方向
   bindEvents();
   bindResizer();
+  bindSidebarResizer();
+  bindSelectionToTerminal();
+  enableTooltips();
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
   await loadRoots();
   await loadFavorites();

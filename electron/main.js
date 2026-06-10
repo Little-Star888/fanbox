@@ -5,7 +5,7 @@
  * 复用零依赖后端 server.js（文件能力），叠加 node-pty 内嵌终端，
  * 让 TUI coding agent（Claude Code / Codex / Aider…）在界面里直接跑起来。
  */
-const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -103,6 +103,21 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+// ⌘Q 兜底：还有终端在跑时（agent 任务），退出前确认，避免手滑全灭
+let quitConfirmed = false;
+app.on('before-quit', (e) => {
+  if (quitConfirmed || terminals.size === 0) return;
+  e.preventDefault();
+  const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+    type: 'warning',
+    buttons: ['取消', '退出'],
+    defaultId: 0,
+    cancelId: 0,
+    message: `还有 ${terminals.size} 个终端会话在运行`,
+    detail: '退出会终止正在运行的 agent 任务，确定退出？',
+  });
+  if (choice === 1) { quitConfirmed = true; app.quit(); }
+});
 app.on('window-all-closed', () => {
   terminals.forEach((p) => { try { p.kill(); } catch { /* */ } });
   terminals.clear();
@@ -114,6 +129,9 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows }) => {
   if (!pty) return { ok: false, error: 'node-pty 未编译，跑：npm run rebuild' };
   const shellPath = process.env.SHELL || (process.platform === 'win32' ? 'powershell.exe' : '/bin/zsh');
   const startCwd = cwd && fs.existsSync(cwd) ? cwd : os.homedir();
+  // GUI 启动的 app 不继承 shell 的 locale，zsh 会把中文路径按字节转义成 \M-^@ 乱码 → 兜底 UTF-8
+  const env = { ...process.env, TERM: 'xterm-256color', FANBOX: '1' };
+  if (!/UTF-8/i.test(env.LC_ALL || env.LC_CTYPE || env.LANG || '')) env.LANG = 'zh_CN.UTF-8';
   let p;
   try {
     p = pty.spawn(shellPath, [], {
@@ -121,7 +139,7 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows }) => {
       cols: cols || 80,
       rows: rows || 24,
       cwd: startCwd,
-      env: { ...process.env, TERM: 'xterm-256color', FANBOX: '1' },
+      env,
     });
   } catch (err) { return { ok: false, error: err.message }; }
   terminals.set(id, p);
@@ -143,6 +161,19 @@ ipcMain.handle('clip:file', (e, { path: p }) => new Promise((resolve) => {
   execFile('osascript', ['-e', 'on run argv', '-e', 'set the clipboard to (POSIX file (item 1 of argv))', '-e', 'end run', p], (err) => resolve({ ok: !err, error: err && err.message }));
 }));
 
+// 拖拽落盘：file-promise 类拖入（截图浮窗等）没有真实路径，把字节写进临时目录换路径
+ipcMain.handle('drop:save', (e, { name, buf }) => {
+  try {
+    const dir = path.join(app.getPath('temp'), 'fanbox-drops');
+    fs.mkdirSync(dir, { recursive: true });
+    const safe = String(name || '拖入文件.png').replace(/[/\\:]/g, '_');
+    let dest = path.join(dir, safe);
+    if (fs.existsSync(dest)) dest = path.join(dir, `${Date.now()}-${safe}`);
+    fs.writeFileSync(dest, Buffer.from(buf));
+    return { ok: true, path: dest };
+  } catch (err) { return { ok: false, error: err.message }; }
+});
+
 ipcMain.on('pty:input', (e, { id, data }) => { const p = terminals.get(id); if (p) p.write(data); });
 ipcMain.on('pty:resize', (e, { id, cols, rows }) => { const p = terminals.get(id); if (p) { try { p.resize(cols, rows); } catch { /* */ } } });
 ipcMain.on('pty:kill', (e, { id }) => { const p = terminals.get(id); if (p) { try { p.kill(); } catch { /* */ } terminals.delete(id); } });
@@ -159,22 +190,30 @@ ipcMain.handle('pty:cwd', (e, { id }) => new Promise((resolve) => {
   });
 }));
 
-// ---------- 文件监听（agent 改文件 → 自动刷新）----------
-let watcher = null;
-let watchDir = null;
-ipcMain.handle('fs:watch', (e, { dir }) => {
-  if (dir === watchDir) return { ok: true };
-  try { if (watcher) watcher.close(); } catch { /* */ }
-  watcher = null; watchDir = null;
-  if (!dir || !fs.existsSync(dir)) return { ok: false };
+// ---------- 文件监听（agent 改文件 → 自动刷新 + 跨项目变更收件箱）----------
+// 多目录监听：浏览目录 + 每个终端会话所在的项目目录。一下午开多个项目跑 agent 时，
+// 不在前台的项目也能感知变更。前端发来期望监听集，这里做增量 diff（关掉多余、补上新增）。
+const watchers = new Map(); // dir -> FSWatcher
+function startWatch(dir) {
+  if (watchers.has(dir) || !dir || !fs.existsSync(dir)) return;
   try {
-    // 递归监听：agent 在子目录改文件也能触发刷新（前端按 250ms 防抖，事件风暴只刷一次）
-    // macOS(FSEvents)/Windows 原生支持递归；Linux 递归不可靠，降级为非递归监听当前目录
+    // macOS(FSEvents)/Windows 原生递归；Linux 递归不可靠，降级为非递归监听当前目录
     const recursive = process.platform !== 'linux';
-    watcher = fs.watch(dir, { persistent: false, recursive }, (evt, filename) => {
+    const w = fs.watch(dir, { persistent: false, recursive }, (evt, filename) => {
       if (win && !win.isDestroyed()) win.webContents.send('fs:changed', { dir, filename: filename ? filename.toString() : null });
     });
-    watchDir = dir;
-    return { ok: true };
-  } catch (err) { return { ok: false, error: err.message }; }
+    watchers.set(dir, w);
+  } catch { /* 无权限等，跳过该目录 */ }
+}
+ipcMain.handle('fs:watch-set', (e, { dirs }) => {
+  const want = new Set((dirs || []).filter(Boolean));
+  for (const [dir, w] of watchers) { if (!want.has(dir)) { try { w.close(); } catch { /* */ } watchers.delete(dir); } }
+  for (const dir of want) startWatch(dir);
+  return { ok: true, count: watchers.size };
+});
+// 兼容旧单目录接口：等价于「只监听这一个目录」
+ipcMain.handle('fs:watch', (e, { dir }) => {
+  for (const [d, w] of watchers) { if (d !== dir) { try { w.close(); } catch { /* */ } watchers.delete(d); } }
+  startWatch(dir);
+  return { ok: true };
 });
