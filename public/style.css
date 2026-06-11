@@ -510,6 +510,23 @@ kbd {
 #statusbar a { color: var(--text-dim); cursor: pointer; }
 #statusbar a:hover { color: var(--accent); }
 
+/* 截图直通车 */
+.shot-card {
+  position: fixed; right: 18px; bottom: 18px; z-index: 300; width: 224px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35); overflow: hidden; animation: shotIn 0.22s ease;
+}
+@keyframes shotIn { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.shot-thumb {
+  display: block; width: 100%; max-height: 150px; object-fit: contain; cursor: grab;
+  background: repeating-conic-gradient(color-mix(in srgb, var(--text) 11%, transparent) 0% 25%, transparent 0% 50%) 0 0 / 14px 14px, var(--bg-3);
+}
+.shot-info { padding: 8px 10px; }
+.shot-name { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 6px; }
+.shot-acts { display: flex; gap: 6px; }
+.shot-acts button { font-size: 11px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-3); color: var(--text-dim); cursor: pointer; }
+.shot-acts button:hover { color: var(--text); border-color: var(--accent); }
+
 /* 项目记忆 */
 .sb-links { display: flex; gap: 14px; }
 .mem-dialog { width: 680px; max-width: 94vw; }

@@ -677,6 +677,25 @@ async function archiveList(p) {
   return { ok: true, entries: entries.slice(0, MAX), truncated };
 }
 
+// 移动文件到目标目录（截图直通车「收进素材」等用）：同卷 rename，跨卷回退拷贝；同名自动加序号防覆盖
+async function movePath(src, dstDir) {
+  const s = resolvePath(src), d = resolvePath(dstDir);
+  if (!fs.existsSync(s)) return { ok: false, error: '源文件不存在' };
+  await fsp.mkdir(d, { recursive: true });
+  let dst = path.join(d, path.basename(s));
+  if (fs.existsSync(dst)) {
+    const ex = path.extname(dst), base = path.basename(dst, ex);
+    let i = 2;
+    while (fs.existsSync(dst)) dst = path.join(d, `${base}-${i++}${ex}`);
+  }
+  try { await fsp.rename(s, dst); }
+  catch (e) {
+    if (e.code === 'EXDEV') { await fsp.copyFile(s, dst); await fsp.unlink(s); }
+    else return { ok: false, error: e.message };
+  }
+  return { ok: true, path: dst };
+}
+
 async function createEntry(parentPath, name, type) {
   const parent = resolvePath(parentPath);
   name = (name || '').trim();
@@ -1675,6 +1694,10 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/trash' && req.method === 'POST') {
       const b = await readBody(req);
       return sendJSON(res, 200, await trashPath(b.path));
+    }
+    if (p === '/api/move' && req.method === 'POST') {
+      const b = await readBody(req);
+      return sendJSON(res, 200, await movePath(b.src, b.dstDir));
     }
     if (p === '/api/rename' && req.method === 'POST') {
       const b = await readBody(req);

@@ -1291,6 +1291,47 @@ function confirmDialog(msg) {
     ov.querySelector('[data-act=yes]').focus();
   });
 }
+// ---------- 截图直通车：系统截屏落盘 → 右下角浮出直通卡，终端/素材/标注一步到位 ----------
+const shotTray = {
+  el: null, timer: null,
+  init() {
+    if (!window.fanboxShot) return; // 浏览器版没有截屏监听
+    window.fanboxShot.onNew((m) => this.show(m));
+  },
+  show(m) {
+    this.dismiss();
+    const el = document.createElement('div');
+    el.className = 'shot-card';
+    el.innerHTML = `
+      <img class="shot-thumb" draggable="true" src="/api/thumb?path=${encodeURIComponent(m.path)}&w=480&v=${m.size}" title="新截图 · 可拖进终端">
+      <div class="shot-info"><div class="shot-name">${escapeHtml(m.name)}</div>
+      <div class="shot-acts">
+        <button data-act="term" title="把路径喂给终端里的 agent">→ 终端</button>
+        <button data-act="save" title="移动到当前文件夹的 素材/ 子目录">收进素材</button>
+        <button data-act="edit" title="圈重点再发">标注</button>
+        <button data-act="close" title="不理它也会自己走">✕</button>
+      </div></div>`;
+    document.body.appendChild(el);
+    this.el = el;
+    const img = el.querySelector('.shot-thumb');
+    img.ondragstart = (ev) => ev.dataTransfer.setData('text/plain', m.path);
+    img.onclick = () => lightbox(m.path);
+    el.querySelector('[data-act=term]').onclick = () => { term.insertPath(m.path); this.dismiss(); };
+    el.querySelector('[data-act=save]').onclick = async () => {
+      const r = await apiPost('/api/move', { src: m.path, dstDir: state.cwd + '/素材' });
+      if (r.ok) toast('已收进 素材/'); else toast(r.error || '移动失败', true);
+      this.dismiss();
+    };
+    el.querySelector('[data-act=edit]').onclick = () => {
+      this.dismiss();
+      enterImageEdit({ path: m.path, name: m.name, kind: 'image', size: m.size, mtime: Date.now() });
+    };
+    el.querySelector('[data-act=close]').onclick = () => this.dismiss();
+    this.timer = setTimeout(() => this.dismiss(), 45000);
+  },
+  dismiss() { clearTimeout(this.timer); if (this.el) { this.el.remove(); this.el = null; } },
+};
+
 // 项目记忆：这个文件夹里 AI 干过什么——历史会话考古，可展开改过的文件，可一键续上
 async function memoryPanel(dirPath) {
   const old = $('.mem-overlay'); if (old) old.remove();
@@ -1772,6 +1813,7 @@ function bindEvents() {
   $('#term-claude').onclick = () => term.launchAgent('claude --dangerously-skip-permissions');
   $('#term-codex').onclick = () => term.launchAgent('codex');
   usagePanel.bind();
+  shotTray.init();
   $('#skills-entry').onclick = () => skillsView.show();
   $('#term-newtab').onclick = () => term.newTab();
   $('#term-max').onclick = () => term.toggleMax();
