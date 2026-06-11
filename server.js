@@ -905,21 +905,153 @@ async function codexUsage() {
         const pl = d && d.payload;
         const rl = pl && pl.rate_limits;
         if (!rl || (!rl.primary && !rl.secondary)) continue;
-        const win = (w) => w ? { usedPercent: w.used_percent, windowMinutes: w.window_minutes, resetsAt: w.resets_at } : null;
-        return { planType: rl.plan_type || '', capturedAt: Date.parse(d.timestamp || '') || f.mtimeMs, primary: win(rl.primary), secondary: win(rl.secondary) };
+        const capturedAt = Date.parse(d.timestamp || '') || f.mtimeMs;
+        // 快照是「当时」的数：窗口在快照之后重置过的话，旧百分比就完全失真（比如 21 小时前
+        // 的 5h 窗口 57%），归零并标 stale——没有新会话日志就说明重置后根本没用过
+        const win = (w) => {
+          if (!w) return null;
+          let resetsAt = w.resets_at || 0;
+          if (typeof resetsAt === 'string') resetsAt = Math.floor(Date.parse(resetsAt) / 1000) || 0;
+          let end = resetsAt * 1000;
+          if (!end && w.resets_in_seconds != null) end = capturedAt + w.resets_in_seconds * 1000;
+          if (!end && w.window_minutes) end = capturedAt + w.window_minutes * 60000;
+          const stale = !!end && end < Date.now();
+          return { usedPercent: stale ? 0 : w.used_percent, windowMinutes: w.window_minutes, resetsAt: stale ? 0 : resetsAt, stale };
+        };
+        return { planType: rl.plan_type || '', capturedAt, primary: win(rl.primary), secondary: win(rl.secondary) };
       }
     } catch { /* 下一个文件 */ }
   }
   return null;
 }
 
+// Claude Code 官方限额窗口（和它 /usage 面板同源）：5h 滚动窗口 + 周配额的百分比和重置时间。
+// 本地 jsonl 只有 token 流水、推不出官方百分比，必须拿 Claude Code 自己的 OAuth token
+// （macOS 在 Keychain，其他平台落在 ~/.claude/.credentials.json）查官方 usage 接口。
+// 这是本服务唯一的出网请求，只发往 api.anthropic.com——Claude Code 平时也在发同一个请求。
+async function claudeOAuthToken() {
+  const pick = (raw) => {
+    const o = JSON.parse(raw).claudeAiOauth;
+    return o && o.accessToken && (!o.expiresAt || o.expiresAt > Date.now()) ? o.accessToken : null;
+  };
+  if (PLATFORM === 'darwin') {
+    try {
+      const out = await new Promise((resolve, reject) => {
+        execFile('security', ['find-generic-password', '-s', 'Claude Code-credentials', '-w'],
+          { timeout: 3000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+      });
+      const t = pick(out);
+      if (t) return t;
+    } catch { /* 落到凭证文件 */ }
+  }
+  try { return pick(await fsp.readFile(path.join(HOME, '.claude', '.credentials.json'), 'utf8')); }
+  catch { return null; }
+}
+
+async function claudeOfficialLimits() {
+  const token = await claudeOAuthToken();
+  if (!token) return null;
+  // 不用 Node https：该接口的防护按 TLS 指纹拦——同样的请求头 curl 能 200、Node 直接 403。
+  // 走系统 curl（macOS/Win10+ 自带），顺带继承用户的代理环境变量；
+  // token 经 stdin 的 curl 配置传入，不暴露在进程列表里
+  const body = await new Promise((resolve, reject) => {
+    const cp = execFile('curl', ['-sS', '--max-time', '8', '-K', '-', 'https://api.anthropic.com/api/oauth/usage'],
+      { timeout: 10000 }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+    cp.stdin.end(`header = "Authorization: Bearer ${token}"\nheader = "anthropic-beta: oauth-2025-04-20"\n`);
+  });
+  const d = JSON.parse(body);
+  const win = (w) => (w && w.utilization != null)
+    ? { usedPercent: w.utilization, resetsAt: w.resets_at ? Math.floor(Date.parse(w.resets_at) / 1000) : 0 }
+    : null;
+  const fiveHour = win(d.five_hour), sevenDay = win(d.seven_day);
+  return (fiveHour || sevenDay) ? { fiveHour, sevenDay } : null;
+}
+
+// ---------- Agent 项目（最近被 coding agent 处理过的项目文件夹）----------
+// Claude Code：~/.claude/projects/<munge过的路径>/*.jsonl，目录名不可逆，但行里带 "cwd":"真实路径"
+// Codex：~/.codex/sessions/**/rollout-*.jsonl 开头的 session_meta 带 cwd
+let agentProjCache = { at: 0, data: null };
+
+async function readCwdFromHead(file, bytes) {
+  const fh = await fsp.open(file, 'r');
+  try {
+    const buf = Buffer.alloc(bytes);
+    const { bytesRead } = await fh.read(buf, 0, bytes, 0);
+    const m = buf.toString('utf8', 0, bytesRead).match(/"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    return m ? JSON.parse('"' + m[1] + '"') : null;
+  } finally { await fh.close(); }
+}
+
+async function agentProjects() {
+  if (agentProjCache.data && Date.now() - agentProjCache.at < 60000) return agentProjCache.data;
+  const cutoff = Date.now() - 30 * 86400000;
+  const map = new Map(); // cwd -> { lastActive, agents: Set }
+  const add = (cwd, t, agent) => {
+    if (!cwd || cwd === HOME) return; // 在家目录裸跑的会话不算「项目」
+    const cur = map.get(cwd) || { lastActive: 0, agents: new Set() };
+    cur.lastActive = Math.max(cur.lastActive, t);
+    cur.agents.add(agent);
+    map.set(cwd, cur);
+  };
+  // Claude Code：每个项目目录取最新的 jsonl，从文件头抓 cwd
+  try {
+    const dirs = await fsp.readdir(CLAUDE_PROJ);
+    await Promise.all(dirs.map(async (d) => {
+      const base = path.join(CLAUDE_PROJ, d);
+      let names; try { names = await fsp.readdir(base); } catch { return; }
+      let newest = null;
+      await Promise.all(names.filter((n) => n.endsWith('.jsonl')).map(async (n) => {
+        try {
+          const st = await fsp.stat(path.join(base, n));
+          if (!newest || st.mtimeMs > newest.mtimeMs) newest = { fp: path.join(base, n), mtimeMs: st.mtimeMs };
+        } catch { /* */ }
+      }));
+      if (!newest || newest.mtimeMs < cutoff) return;
+      try { add(await readCwdFromHead(newest.fp, 65536), newest.mtimeMs, 'claude'); } catch { /* */ }
+    }));
+  } catch { /* 没用过 Claude Code */ }
+  // Codex：最近改动的 rollout 文件头部抓 cwd（数量封顶，控制 IO）
+  try {
+    const files = [];
+    const walk = async (dir, depth) => {
+      let names;
+      try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const n of names) {
+        const fp = path.join(dir, n.name);
+        if (n.isDirectory() && depth < 3) await walk(fp, depth + 1);
+        else if (n.isFile() && n.name.endsWith('.jsonl')) {
+          try { const st = await fsp.stat(fp); if (st.mtimeMs >= cutoff) files.push({ fp, mtimeMs: st.mtimeMs }); } catch { /* */ }
+        }
+      }
+    };
+    await walk(CODEX_SESS, 0);
+    files.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    await Promise.all(files.slice(0, 40).map(async (f) => {
+      try { add(await readCwdFromHead(f.fp, 16384), f.mtimeMs, 'codex'); } catch { /* */ }
+    }));
+  } catch { /* 没用过 Codex */ }
+  // 按最近活跃排序，已被删除的项目目录剔掉
+  const sorted = [...map.entries()].sort((a, b) => b[1].lastActive - a[1].lastActive);
+  const projects = [];
+  for (const [cwd, info] of sorted) {
+    if (projects.length >= 12) break;
+    try { if (!(await fsp.stat(cwd)).isDirectory()) continue; } catch { continue; }
+    projects.push({ path: cwd, name: path.basename(cwd), agents: [...info.agents], lastActive: info.lastActive });
+  }
+  const data = { ok: true, projects };
+  agentProjCache = { at: Date.now(), data };
+  return data;
+}
+
 async function agentUsage() {
   if (usageResultCache.data && Date.now() - usageResultCache.at < 30000) return usageResultCache.data;
-  const [claude, codex] = await Promise.all([
+  const [claude, codex, claudeLimits] = await Promise.all([
     claudeUsage().catch(() => null),
     codexUsage().catch(() => null),
+    claudeOfficialLimits().catch(() => null),
   ]);
-  const data = { ok: true, at: Date.now(), claude, codex };
+  const claudeOut = (claude || claudeLimits) ? { ...(claude || {}), official: claudeLimits } : null;
+  const data = { ok: true, at: Date.now(), claude: claudeOut, codex };
   usageResultCache = { at: Date.now(), data };
   return data;
 }
@@ -1035,6 +1167,9 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/create' && req.method === 'POST') {
       const b = await readBody(req);
       return sendJSON(res, 200, await createEntry(b.path, b.name, b.type));
+    }
+    if (p === '/api/agent-projects') {
+      return sendJSON(res, 200, await agentProjects());
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());

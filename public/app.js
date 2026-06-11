@@ -998,7 +998,6 @@ async function copyPath(p) {
 function recordRecent(p) {
   if (!p) return;
   state.recentOpened = [p, ...(state.recentOpened || []).filter((x) => x !== p)].slice(0, 30);
-  renderRecentOpened();
   apiPost('/api/recent-open', { path: p }).catch(() => {});
 }
 async function toggleFav(e) {
@@ -1308,6 +1307,41 @@ function popupMenu(ev, items) {
 }
 
 // ---------- 侧边栏 ----------
+// 侧栏目录树：目录项带展开箭头，点箭头逐级懒加载子目录（只列文件夹），点行本身仍是跳转
+function navDirLi(name, p) {
+  const li = document.createElement('li');
+  li.dataset.path = p;
+  const twirl = document.createElement('span');
+  twirl.className = 'twirl';
+  twirl.textContent = '▸';
+  twirl.title = '展开子文件夹';
+  twirl.onclick = (ev) => { ev.stopPropagation(); toggleNavSub(li, p, twirl); };
+  const ico = document.createElement('span');
+  ico.className = 'ico';
+  ico.innerHTML = svgWrap(SVG.folder, 'currentColor', 16, true);
+  const label = document.createElement('span');
+  label.className = 'label';
+  label.textContent = name;
+  label.title = p;
+  li.append(twirl, ico, label);
+  li.onclick = () => navigate(p);
+  makeDraggablePath(li, p);
+  return li;
+}
+async function toggleNavSub(li, dirPath, twirl) {
+  const old = li.nextElementSibling;
+  if (old && old.classList.contains('nav-sub')) { old.remove(); twirl.textContent = '▸'; return; }
+  twirl.textContent = '▾';
+  const ul = document.createElement('ul');
+  ul.className = 'nav-list nav-sub';
+  li.after(ul);
+  try {
+    const data = await api('/api/list?path=' + encodeURIComponent(dirPath));
+    const dirs = (data.entries || []).filter((e) => e.isDir && !e.hidden);
+    if (!dirs.length) { ul.innerHTML = '<div class="nav-empty">没有子文件夹</div>'; return; }
+    dirs.forEach((e) => ul.appendChild(navDirLi(e.name, e.path)));
+  } catch { ul.remove(); twirl.textContent = '▸'; }
+}
 async function loadRoots() {
   const data = await api('/api/roots');
   state.home = data.home;
@@ -1315,14 +1349,7 @@ async function loadRoots() {
   state.sep = data.sep || '/';
   const ul = $('#roots-list');
   ul.innerHTML = '';
-  data.roots.forEach((r) => {
-    const li = document.createElement('li');
-    li.dataset.path = r.path;
-    li.innerHTML = `<span class="ico">${svgWrap(SVG.folder, 'currentColor', 16, true)}</span><span class="label">${r.name}</span>`;
-    li.onclick = () => navigate(r.path);
-    makeDraggablePath(li, r.path);
-    ul.appendChild(li);
-  });
+  data.roots.forEach((r) => ul.appendChild(navDirLi(r.name, r.path)));
 }
 function renderRootsActive() {
   $('#roots-list').querySelectorAll('li').forEach((li) => li.classList.toggle('active', li.dataset.path === state.cwd));
@@ -1332,33 +1359,62 @@ async function loadFavorites() {
   state.favorites = data.favorites || [];
   state.recentOpened = data.recentOpened || [];
   renderFavs();
-  renderRecentOpened();
 }
 function renderFavs() {
   const ul = $('#favs-list');
   ul.innerHTML = '';
   if (!state.favorites.length) { ul.innerHTML = '<div class="nav-empty">悬停文件点 ☆ 即可收藏</div>'; return; }
   state.favorites.forEach((f) => {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="ico">${svgWrap(f.isDir ? SVG.folder : SVG.file, 'currentColor', 16, f.isDir)}</span><span class="label" title="${escapeHtml(f.path)}">${escapeHtml(f.name)}</span><span class="unfav" title="移除">✕</span>`;
-    li.onclick = (ev) => {
-      if (ev.target.classList.contains('unfav')) { toggleFav(f); return; }
-      if (f.isDir) navigate(f.path);
-      else navigate(dirOf(f.path)).then(() => { const e = state.entries.find((x) => x.path === f.path); if (e) { state.selected = f.path; openPreview(e); renderFiles(); } });
-    };
-    makeDraggablePath(li, f.path);
+    let li;
+    if (f.isDir) {
+      li = navDirLi(f.name, f.path);
+    } else {
+      li = document.createElement('li');
+      li.innerHTML = `<span class="ico">${svgWrap(SVG.file, 'currentColor', 16)}</span><span class="label" title="${escapeHtml(f.path)}">${escapeHtml(f.name)}</span>`;
+      li.onclick = () => navigate(dirOf(f.path)).then(() => { const e = state.entries.find((x) => x.path === f.path); if (e) { state.selected = f.path; openPreview(e); renderFiles(); } });
+      makeDraggablePath(li, f.path);
+    }
+    const un = document.createElement('span');
+    un.className = 'unfav';
+    un.title = '移除';
+    un.textContent = '✕';
+    un.onclick = (ev) => { ev.stopPropagation(); toggleFav(f); };
+    li.appendChild(un);
     ul.appendChild(li);
   });
 }
-function renderRecentOpened() {
-  const ul = $('#recent-opened-list');
+// Agent 项目：最近被 Claude Code / Codex 处理过的项目文件夹，从两者的本机会话日志扫出来
+function agoShort(ms) {
+  const m = Math.round((Date.now() - ms) / 60000);
+  if (m < 2) return '刚刚';
+  if (m < 60) return m + ' 分';
+  if (m < 1440) return Math.round(m / 60) + ' 时';
+  return Math.round(m / 1440) + ' 天';
+}
+async function loadAgentProjects() {
+  let data;
+  try { data = await api('/api/agent-projects'); } catch { return; }
+  const list = (data.projects || []).slice(0, 8);
+  // 数据没变就不动 DOM，免得定时刷新把用户展开的子树抹掉
+  const sig = JSON.stringify(list);
+  if (sig === loadAgentProjects._sig) return;
+  loadAgentProjects._sig = sig;
+  const ul = $('#agent-projects-list');
   ul.innerHTML = '';
-  if (!state.recentOpened.length) { ul.innerHTML = '<div class="nav-empty">打开过的文件会出现在这里</div>'; return; }
-  state.recentOpened.slice(0, 8).forEach((p) => {
-    const li = document.createElement('li');
-    li.innerHTML = `<span class="ico">${svgWrap(SVG.file, 'currentColor', 16)}</span><span class="label">${escapeHtml(baseOf(p))}</span>`;
-    li.title = p;
-    li.onclick = () => openWith(p, 'default');
+  if (!list.length) { ul.innerHTML = '<div class="nav-empty">用 Claude Code / Codex 跑过的项目会出现在这里</div>'; return; }
+  list.forEach((pj) => {
+    const li = navDirLi(pj.name, pj.path);
+    li.querySelector('.label').title = `${pj.path}\n${pj.agents.join(' + ')} · ${agoShort(pj.lastActive)}前活跃`;
+    const when = document.createElement('span');
+    when.className = 'when';
+    pj.agents.forEach((a) => {
+      const dot = document.createElement('i');
+      dot.className = 'agent-dot ' + a;
+      dot.title = a;
+      when.appendChild(dot);
+    });
+    when.append(agoShort(pj.lastActive));
+    li.appendChild(when);
     ul.appendChild(li);
   });
 }
@@ -2234,7 +2290,7 @@ const term = {
 };
 
 // ---------- Agent 用量面板（侧栏常驻，可开合）----------
-// Claude Code 是本地 token 统计（无官方百分比可拿），Codex 是官方配额快照（来自其会话日志）
+// Claude Code 是官方限额窗口（5h/周，OAuth 接口）+ 本地 token 统计兜底，Codex 是官方配额快照（来自其会话日志）
 const usagePanel = {
   timer: null,
   fmtTok(n) {
@@ -2272,19 +2328,27 @@ const usagePanel = {
     if (d.codex) {
       const c = d.codex;
       h += `<div class="usage-agent">Codex${c.planType ? ` <i class="usage-plan">${escapeHtml(c.planType)}</i>` : ''}</div>`;
-      if (c.primary) h += this.bar('5h 窗口', c.primary.usedPercent, '');
-      if (c.secondary) h += this.bar('周配额', c.secondary.usedPercent, this.fmtReset(c.secondary.resetsAt));
+      if (c.primary) h += this.bar('5h 窗口', c.primary.usedPercent, c.primary.stale ? '窗口已重置，跑一次 Codex 才有新数' : '');
+      if (c.secondary) h += this.bar('周配额', c.secondary.usedPercent, c.secondary.stale ? '窗口已重置，跑一次 Codex 才有新数' : this.fmtReset(c.secondary.resetsAt));
       h += `<div class="usage-sub">快照：${this.ago(c.capturedAt)}的 Codex 会话</div>`;
     }
     if (d.claude) {
       const c = d.claude;
-      h += `<div class="usage-agent">Claude Code</div>
-        <div class="usage-trio">
+      h += `<div class="usage-agent">Claude Code</div>`;
+      if (c.official) {
+        // 官方限额窗口（和 Claude Code /usage 面板同源）：5h 滚动窗口 + 周配额
+        if (c.official.fiveHour) h += this.bar('5h 窗口', c.official.fiveHour.usedPercent, this.fmtReset(c.official.fiveHour.resetsAt));
+        if (c.official.sevenDay) h += this.bar('周配额', c.official.sevenDay.usedPercent, this.fmtReset(c.official.sevenDay.resetsAt));
+        if (c.last5h) h += `<div class="usage-sub">近5h ${this.fmtTok(c.last5h.total)} · 本周 ${this.fmtTok(c.week.total)} token</div>`;
+      } else if (c.last5h) {
+        // 拿不到官方数据（离线 / 没有 OAuth 凭证）：回退本地 token 统计
+        h += `<div class="usage-trio">
           <span><b>${this.fmtTok(c.last5h.total)}</b>近5h</span>
           <span><b>${this.fmtTok(c.today.total)}</b>今日</span>
           <span><b>${this.fmtTok(c.week.total)}</b>本周</span>
         </div>
         <div class="usage-sub">token 总量 · 本地会话日志统计</div>`;
+      }
     }
     if (!d.codex && !d.claude) h = '<div class="usage-sub">没找到 Claude Code / Codex 的本机会话记录</div>';
     box.innerHTML = h;
@@ -2688,6 +2752,8 @@ async function init() {
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
   await loadRoots();
   await loadFavorites();
+  loadAgentProjects();
+  setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
   await navigate(state.home, false);
   // 恢复上次终端开合状态（dock 方位已由 applyDock 自带记忆）
   if (localStorage.getItem('fb_term_open') === '1' && term.available()) term.open();
