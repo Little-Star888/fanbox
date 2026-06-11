@@ -479,6 +479,32 @@ async function renamePath(p, newName) {
   return { ok: true, path: dst };
 }
 
+// ---------- 磁盘占用透视：算清当前目录每个子项的真实占用 ----------
+// 文件直接 stat（快）；目录一次 du -sk 批量算。du 碰到无权限子目录会报错但仍输出能算的部分，所以忽略 err 只用 stdout
+async function diskUsage(p) {
+  const dir = resolvePath(p);
+  let names;
+  try { names = await fsp.readdir(dir, { withFileTypes: true }); } catch (e) { return { ok: false, error: '读取失败：' + e.message }; }
+  const dirs = [], items = [];
+  await Promise.all(names.map(async (d) => {
+    const full = path.join(dir, d.name);
+    if (d.isDirectory() && !d.isSymbolicLink()) { dirs.push(full); return; }
+    try { const st = await fsp.lstat(full); if (st.isFile()) items.push({ name: d.name, size: st.size, isDir: false }); } catch { /* */ }
+  }));
+  if (dirs.length) {
+    const out = await new Promise((resolve) => {
+      execFile('du', ['-sk', ...dirs], { timeout: 120000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(stdout || ''));
+    });
+    for (const line of out.split('\n')) {
+      const m = line.match(/^(\d+)\s+(.+)$/);
+      if (m) items.push({ name: path.basename(m[2]), size: Number(m[1]) * 1024, isDir: true });
+    }
+  }
+  items.sort((a, b) => b.size - a.size);
+  const total = items.reduce((a, b) => a + b.size, 0);
+  return { ok: true, dir, total, items: items.slice(0, 60), more: Math.max(0, items.length - 60) };
+}
+
 // 压缩包内容清单：全用系统自带工具（unzip / bsdtar / gzip），保持零依赖
 async function archiveList(p) {
   const file = resolvePath(p);
@@ -1505,6 +1531,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/archive') {
       return sendJSON(res, 200, await archiveList(url.searchParams.get('path')));
+    }
+    if (p === '/api/du') {
+      return sendJSON(res, 200, await diskUsage(url.searchParams.get('path')));
     }
     if (p === '/api/trash' && req.method === 'POST') {
       const b = await readBody(req);
