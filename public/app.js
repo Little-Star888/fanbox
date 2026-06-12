@@ -254,6 +254,7 @@ const isMdName = (n) => /\.(md|markdown)$/i.test(String(n || ''));
 // ---------- 导航 ----------
 async function navigate(p, pushHistory = true) {
   if (!await guardDirty()) return;
+  ensureFileAreaSize();
   try {
     const data = await api('/api/list?path=' + encodeURIComponent(p));
     if (data.error) { toast('无法打开：' + data.error, true); return; }
@@ -606,22 +607,52 @@ function fsUrl(p, mtime) {
 }
 function renderHtmlPreview(data, meta) {
   const body = $('#preview-body');
-  body.innerHTML = meta +
-    `<div class="pv-toolbar"><button id="html-toggle" class="ghost-btn">查看源码</button><button id="html-browser" class="ghost-btn">${ic('globe', 'currentColor', 13)} 浏览器打开（看完整交互）</button></div>` +
-    // src 指到 /fs/ 路径镜像端点，页面里的相对引用（./img.png、子目录）才能按所在目录解析；
-    // srcdoc 没有 base URL，本地图片/CSS 全是裂的。
-    // 只给 allow-scripts，不给 allow-same-origin：sandbox 让文档落到 opaque origin，
-    // 否则它的脚本可经 window.parent 摸到 preload 暴露的 fanboxPty.spawn → 预览一个文件就能 RCE。
-    // 需要完整同源交互的页面走「浏览器打开」按钮。
-    `<iframe class="iframe-preview" sandbox="allow-scripts" src="${fsUrl(data.path, data.mtime)}"></iframe>`;
+  // 用 html-preview-host 把 meta、工具栏、iframe 包成 flex 列：
+  // iframe 占满剩余高度，避免 100% 高度叠加兄弟元素导致父容器也出现滚动条，
+  // 从而让 iframe 自己稳定处理页面内滚动。
+  body.innerHTML =
+    `<div class="html-preview-host">
+      ${meta}
+      <div class="pv-toolbar"><button id="html-toggle" class="ghost-btn">查看源码</button><button id="html-fit" class="ghost-btn hidden"></button><button id="html-browser" class="ghost-btn">${ic('globe', 'currentColor', 13)} 浏览器打开（看完整交互）</button></div>
+      <div class="iframe-wrap"><iframe class="iframe-preview" sandbox="allow-scripts" scrolling="yes" src="${fsUrl(data.path, data.mtime)}"></iframe></div>
+    </div>`;
+  // 桌面 Chromium 的 iframe 不认 viewport meta，定宽桌面页在窄预览框里只露左上角。
+  // /fs/ 注入的测宽脚本会把页面自然宽度 postMessage 过来：超出容器就整页等比缩到适配，
+  // 工具栏按钮可在「适配宽度 ↔ 实际大小」间切换（实际大小时在 iframe 内部滚动看全页）
+  const wrap = body.querySelector('.iframe-wrap');
+  const frame = wrap.firstElementChild;
+  const fitBtn = $('#html-fit');
+  let natW = 0, fitOn = true;
+  const applyFit = () => {
+    const cw = wrap.clientWidth;
+    if (!natW || natW <= cw + 8 || !cw) { frame.removeAttribute('style'); fitBtn.classList.add('hidden'); return; }
+    fitBtn.classList.remove('hidden');
+    if (!fitOn) { frame.removeAttribute('style'); fitBtn.textContent = '适配宽度'; return; }
+    const k = cw / natW;
+    frame.style.cssText = `width:${natW}px;height:${Math.round(wrap.clientHeight / k)}px;transform:scale(${k});transform-origin:0 0;`;
+    fitBtn.textContent = `实际大小（现 ${Math.round(k * 100)}%）`;
+  };
+  const onMsg = (ev) => {
+    if (!frame.isConnected || ev.source !== frame.contentWindow) return;
+    const w = ev.data && ev.data.fanboxPreviewWidth;
+    if (typeof w === 'number' && w > 0 && w !== natW) { natW = w; applyFit(); }
+  };
+  // 上一个 HTML 预览的监听先拆掉（切文件时旧 iframe 已 detach，监听只剩泄漏）
+  if (renderHtmlPreview._cleanup) renderHtmlPreview._cleanup();
+  window.addEventListener('message', onMsg);
+  const ro = new ResizeObserver(applyFit);
+  ro.observe(wrap);
+  renderHtmlPreview._cleanup = () => { window.removeEventListener('message', onMsg); ro.disconnect(); renderHtmlPreview._cleanup = null; };
+  fitBtn.onclick = () => { fitOn = !fitOn; applyFit(); };
   let src = false;
   $('#html-browser').onclick = () => openWith(data.path, 'default');
   $('#html-toggle').onclick = () => {
     src = !src;
     if (src) {
+      if (renderHtmlPreview._cleanup) renderHtmlPreview._cleanup();
       const pre = document.createElement('pre');
       pre.innerHTML = `<code class="language-html">${escapeHtml(data.content || '')}</code>`;
-      body.querySelector('.iframe-preview').replaceWith(pre);
+      wrap.replaceWith(pre);
       if (window.hljs) pre.querySelectorAll('code').forEach((b) => { try { window.hljs.highlightElement(b); } catch {} });
       $('#html-toggle').textContent = '渲染预览';
     } else { renderHtmlPreview(data, meta); }
@@ -811,6 +842,61 @@ function animateLayout() {
   mb.classList.add('lay-anim');
   clearTimeout(animateLayout._t);
   animateLayout._t = setTimeout(() => mb.classList.remove('lay-anim'), 280);
+}
+// 从终端路径/侧边栏等外部触发导航时，若文件区被压得过小或完全隐藏，自动恢复到一个能看内容的合理尺寸。
+// 只在当前尺寸不足时才调整，避免打扰用户已有的合理布局。
+function ensureFileAreaSize() {
+  // 只在用户主动导航时生效：启动首屏要尊重上次保存的布局，
+  // 文件跟随的自动 navigate 更不能把刻意压低的文件区弹开（否则又是一种「跟随失控」）
+  if (!ensureFileAreaSize.armed || follow.navving) return;
+  const mb = $('#main-body');
+  const panel = $('#terminal-panel');
+  if (!mb || !panel || panel.classList.contains('hidden')) return;
+  // 终端铺满时先退出铺满
+  if (term.maximized) term.toggleMax(false);
+  const rect = mb.getBoundingClientRect();
+  const isBottom = term.dock === 'bottom';
+  const FILE_AREA_MIN_H = 320; // 底部 dock 时文件区最小可视高度
+  const FILE_AREA_MIN_W = 480; // 右侧 dock 时文件区最小可视宽度
+  const TERM_MIN_H = 200;      // 终端最小高度
+  const TERM_MIN_W = 280;      // 终端最小宽度
+  const RESIZER = 6;
+  const available = isBottom ? rect.height : rect.width;
+  const desiredFile = isBottom ? FILE_AREA_MIN_H : FILE_AREA_MIN_W;
+  const minTerm = isBottom ? TERM_MIN_H : TERM_MIN_W;
+
+  // 文件区被完全隐藏：退出 squeezed 并重新分配空间
+  if (mb.classList.contains('fm-squeezed')) {
+    mb.classList.remove('fm-squeezed');
+    localStorage.setItem('fb_term_squeeze', '0');
+    const termSize = Math.max(minTerm, available - desiredFile - RESIZER);
+    if (isBottom) {
+      panel.style.height = termSize + 'px';
+      localStorage.setItem('fb_term_h', termSize);
+    } else {
+      panel.style.width = termSize + 'px';
+      localStorage.setItem('fb_term_w', termSize);
+    }
+    animateLayout();
+    term.fitActive();
+    return;
+  }
+
+  // 文件区可见但尺寸不足：压缩终端给文件区腾空间
+  const fileRect = $('#filemgmt').getBoundingClientRect();
+  const currentFile = isBottom ? fileRect.height : fileRect.width;
+  if (currentFile < desiredFile) {
+    const termSize = Math.max(minTerm, available - desiredFile - RESIZER);
+    if (isBottom) {
+      panel.style.height = termSize + 'px';
+      localStorage.setItem('fb_term_h', termSize);
+    } else {
+      panel.style.width = termSize + 'px';
+      localStorage.setItem('fb_term_w', termSize);
+    }
+    animateLayout();
+    term.fitActive();
+  }
 }
 function showPreviewPanel() {
   const wasHidden = $('#preview').classList.contains('hidden');
@@ -2232,7 +2318,7 @@ const term = {
         let m;
         while ((m = re.exec(text)) !== null) { // 行内多候选：跳过被护栏否决的，继续找同行更干净的
           const cand = m[0];
-          if (cand && !cand.includes('…') && !cand.startsWith('//') && text[m.index - 1] !== ':' && !hits.includes(cand)) { hits.push(cand); break; }
+          if (cand && !cand.includes('…') && !cand.includes('...') && !cand.startsWith('//') && text[m.index - 1] !== ':' && !hits.includes(cand)) { hits.push(cand); break; }
         }
       }
       row = start - 1;
@@ -2386,14 +2472,27 @@ const term = {
           // 顿号列举的第二项），后置 split 救不回来——要么整段散文粘进候选 stat 必败，要么首段为空整条丢弃
           const reP = /[^\s'"`:()（）「」【】<>：；，。、？！]*\/[^\s'"`:()（）「」【】<>：；，。、？！]*/g;
           const r2 = [];
+          const truncated = [];
           while ((m = reP.exec(t)) !== null) {
-            // 全角标点几乎不出现在路径里，却常把路径和后续散文粘成一个 token：切到第一个为止
-            const raw = m[0].split(/[，。、？！…—]+/)[0].replace(/[)\],.:;]+$/, '');
+            // 全角标点几乎不出现在路径里，却常把路径和后续散文粘成一个 token：切到第一个为止。
+            // … 不进切断集：它是 agent 截断长路径的省略号（…tems/x/截屏.png 开头截断最常见），
+            // 一刀切会把整条截断路径切成空串丢掉。… 后面还有 / 说明在路径头/中段，保留；
+            // 后面没有 / 的才是粘连散文或尾部截断（basename 已残，搜也搜不到），从右往左切掉
+            let raw = m[0].split(/[，。、？！—]+/)[0];
+            let gi;
+            while ((gi = raw.lastIndexOf('…')) !== -1 && !raw.slice(gi + 1).includes('/')) raw = raw.slice(0, gi);
+            raw = raw.replace(/[)\],.:;]+$/, '');
             if (raw.length < 3 || !raw.includes('/') || /^https?:\/\//.test(raw)) continue;
             if (overlaps(m.index, m.index + raw.length)) continue;
             const tail = t.slice(m.index + raw.length).split(/['"`]/)[0].slice(0, 160);
-            r2.push({ s: m.index, e: m.index + raw.length, cand: raw, tail });
+            // 截断路径（.../…）：完整字符串通不过 stat 验证，但 basename 搜索通常能定位，
+            // 所以不等待验证，直接给下划线；点开后 openTermPath 会走 basename 搜索兜底。
+            const isTruncated = raw.includes('…') || /(^|\/)\.{3,}/.test(raw);
+            if (isTruncated) truncated.push({ s: m.index, e: m.index + raw.length, cand: raw, tail });
+            else r2.push({ s: m.index, e: m.index + raw.length, cand: raw, tail });
           }
+          // 截断路径直接创建链接，避免验证失败导致无法点击
+          truncated.forEach((x) => push(x.s, x.e, x.cand, x.tail));
           const finish = () => {
             // 3. 裸文件名：unicode 字符类（调研.md 能点）+ 扩展名白名单（e.g/node.js 不误报）。
             // 紧跟斜杠路径、只隔空格的裸名多半是同一带空格路径的后半段：点哪段都按完整串定位
@@ -3491,6 +3590,7 @@ async function init() {
   loadAgentProjects();
   setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
   await navigate(state.home, false);
+  ensureFileAreaSize.armed = true; // 首屏导航之后，用户主动导航才允许自动调整布局
   // 恢复上次终端开合状态（dock 方位已由 applyDock 自带记忆）
   if (localStorage.getItem('fb_term_open') === '1' && term.available()) term.open();
   maybeShowGuide();

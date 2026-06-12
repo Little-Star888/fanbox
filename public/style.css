@@ -444,6 +444,16 @@ kbd {
 .md-body table { border-collapse: collapse; width: 100%; margin: 8px 0; }
 .md-body th, .md-body td { border: 1px solid var(--border); padding: 5px 9px; font-size: 13px; }
 .iframe-preview { width: 100%; height: 100%; min-height: 400px; border: none; background: #fff; border-radius: 8px; }
+/* HTML 预览：把 meta、工具栏、iframe 包成 flex 列，iframe 占满剩余空间，
+   避免 100% 高度与兄弟元素叠加导致 preview-body 同时滚动。 */
+.html-preview-host { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.html-preview-host > .preview-meta { flex: 0 0 auto; margin-bottom: 8px; }
+.html-preview-host > .pv-toolbar { flex: 0 0 auto; margin-bottom: 10px; }
+/* iframe 外再包一层 wrap：缩放适配时 iframe 会被撑到页面自然宽再 transform 缩回来，
+   超出部分由 wrap 裁掉；圆角也只能切在 wrap 上（transform 后的 iframe 圆角会跟着缩放跑偏） */
+.html-preview-host > .iframe-wrap { flex: 1 1 0; min-height: 0; overflow: hidden; border-radius: 8px; background: #fff; }
+.html-preview-host .iframe-wrap > .iframe-preview { width: 100%; height: 100%; min-height: 0; display: block; border: none; background: #fff; border-radius: 0; }
+.html-preview-host > pre { flex: 1 1 0; min-height: 0; overflow: auto; margin: 0; }
 
 /* ---------- 命令面板 ---------- */
 .cmdk-overlay {

@@ -946,6 +946,20 @@ async function locatePath(p, name, root, tail, alt, roots) {
       } catch { /* */ }
     }
     if (fuzzy) return { found: true, path: fuzzy.path, isDir: fuzzy.isDir, viaSearch: true };
+    // Spotlight 兜底（macOS）：截断路径常指向所有项目根之外（桌面、下载、临时目录），
+    // 目录遍历够不着；按文件名全盘查，精确同名里取 mtime 最新的（偏向「刚生成的那个」）
+    if (process.platform === 'darwin') {
+      const paths = await mdfind(['-name', name]);
+      let best = null;
+      for (const f of (paths || []).slice(0, 200)) {
+        if (path.basename(f) !== name) continue;
+        try {
+          const st = await fsp.stat(f);
+          if (!best || st.mtimeMs > best.m) best = { path: f, isDir: st.isDirectory(), m: st.mtimeMs };
+        } catch { /* */ }
+      }
+      if (best) return { found: true, path: best.path, isDir: best.isDir, viaSearch: true };
+    }
   }
   return { found: false };
 }
@@ -1196,6 +1210,62 @@ function serveRaw(req, res, filePath) {
       onStreamErr(rs); rs.pipe(res);
     }
   });
+}
+
+// 为 /fs/ 下 HTML 预览注入辅助标签：
+// 1. 测宽脚本——桌面 Chromium 的 iframe 会忽略 viewport meta，定宽桌面页照样按自身宽度铺开，
+//    窄预览框只能露出左上角；脚本把页面自然宽度 postMessage 给前端，由前端整页等比缩放适配。
+// 2. 兜底样式——html/body 可滚动、图片视频不超宽（canvas/svg 不动，挤压它们会让动效 demo 变形）。
+// 3. viewport meta——桌面 iframe 用不上，但保留它，手机经局域网访问预览时有用。
+async function serveHtmlPreview(req, res, filePath) {
+  let file;
+  try { file = resolvePath(filePath); } catch { res.writeHead(400); res.end('bad path'); return; }
+  try {
+    const st = await fsp.stat(file);
+    if (!st.isFile()) { res.writeHead(404); res.end('not found'); return; }
+  } catch { res.writeHead(404); res.end('not found'); return; }
+  try {
+    let html = await fsp.readFile(file, 'utf8');
+    const viewportRe = /<meta[^>]*name=["']viewport["'][^>]*>/i;
+    const styleBlock = `<style data-fanbox-preview>
+  html, body { overflow: auto; }
+  img, video { max-width: 100%; height: auto; }
+</style>`;
+    const measureScript = '<script data-fanbox-measure>(function(){var l=0;function r(){var w=Math.max(document.documentElement.scrollWidth,document.body?document.body.scrollWidth:0);if(w&&w!==l){l=w;try{parent.postMessage({fanboxPreviewWidth:w},"*")}catch(e){}}}addEventListener("load",function(){r();setTimeout(r,300)});addEventListener("resize",r)})()</script>';
+    function injectHead(tag) {
+      const headClose = html.match(/<\/head>/i);
+      const headOpen = html.match(/<head[^>]*>/i);
+      if (headClose) {
+        html = html.slice(0, headClose.index) + '  ' + tag + '\n' + html.slice(headClose.index);
+      } else if (headOpen) {
+        html = html.slice(0, headOpen.index + headOpen[0].length) + '\n  ' + tag + '\n' + html.slice(headOpen.index + headOpen[0].length);
+      } else {
+        // 没有 <head> 时，把标签插到 <!DOCTYPE ...> 之后，或文档最开头
+        const doctype = html.match(/<!DOCTYPE[^>]*>/i);
+        if (doctype) {
+          html = html.slice(0, doctype.index + doctype[0].length) + '\n' + tag + html.slice(doctype.index + doctype[0].length);
+        } else {
+          html = tag + '\n' + html;
+        }
+      }
+    }
+    if (!viewportRe.test(html)) {
+      injectHead('<meta name="viewport" content="width=device-width, initial-scale=1">');
+    }
+    if (!html.includes('data-fanbox-preview')) {
+      injectHead(styleBlock);
+    }
+    if (!html.includes('data-fanbox-measure')) {
+      injectHead(measureScript);
+    }
+    const buf = Buffer.from(html, 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': buf.length });
+    res.end(buf);
+  } catch (err) {
+    // 读取/编码异常时回退到原始流，保证至少能打开
+    console.error('serveHtmlPreview fallback', err);
+    return serveRaw(req, res, filePath);
+  }
 }
 
 const MAX_BODY = 64 * 1024 * 1024; // 64MB 上限，防止恶意请求无限累加把内存撑爆
@@ -1823,8 +1893,14 @@ const server = http.createServer(async (req, res) => {
     // HTML 预览的 iframe 指到这里后，页面里的相对引用（./img.png、子目录、嵌套 iframe）
     // 都能按所在目录正确解析——srcdoc 方案没有 base URL，这些全是裂的。
     // 暴露面与 /api/raw 等价（都接受任意绝对路径），且同样只对本机回环开放。
+    // HTML 文件额外注入 viewport，让预览框内宽度自适应、滚动稳定。
     if (p.startsWith('/fs/')) {
-      return serveRaw(req, res, decodeURIComponent(p.slice(3)));
+      const fsPath = decodeURIComponent(p.slice(3));
+      const fsExt = (ext(fsPath) || '').toLowerCase();
+      if (fsExt === 'html' || fsExt === 'htm') {
+        return serveHtmlPreview(req, res, fsPath);
+      }
+      return serveRaw(req, res, fsPath);
     }
     if (p === '/api/thumb') {
       return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10));
