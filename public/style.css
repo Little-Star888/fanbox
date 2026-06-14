@@ -211,6 +211,8 @@ kbd {
 .breadcrumb::-webkit-scrollbar { display: none; }
 .breadcrumb .crumb { padding: 4px 7px; border-radius: 6px; cursor: pointer; color: var(--text-dim); white-space: nowrap; }
 .breadcrumb .crumb:hover { background: var(--bg-3); color: var(--text); }
+/* 图标（电脑/时钟）默认 baseline 对齐会偏高，改 middle 与同行文字居中 */
+.breadcrumb .crumb svg { vertical-align: middle; }
 /* 当前目录高亮，一眼识别文件面板真正所在 */
 .breadcrumb .crumb.last { color: var(--accent); font-weight: 700; background: var(--accent-soft); padding-right: 9px; }
 .breadcrumb .sep { color: var(--text-faint); }

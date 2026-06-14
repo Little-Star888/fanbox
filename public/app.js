@@ -2379,7 +2379,7 @@ const term = {
       try { const r = await window.fanboxPty.cwd(id); if (r && r.ok && r.cwd) cwd = r.cwd; } catch { /* */ }
       candidate = (cwd || '').replace(/\/$/, '') + '/' + p.replace(/^\.\//, '');
     }
-    const name = p.split('/').pop();
+    const name = p.replace(/\/+$/, '').split('/').pop(); // 去掉目录结尾 / 再取 basename，否则名为空 basename 搜索失效
     // 回扫 scrollback：agent 生成文件时几乎总打印过全路径（裸文件名常常不在 cwd 下），比模糊搜索可信
     const alt = isRel ? this.scanScrollbackFor(id, name, rowHint) : '';
     // 活跃项目根（浏览目录 + 各终端项目目录）作 basename 搜索的额外根
@@ -2468,6 +2468,9 @@ const term = {
       fontFamily: getComputedStyle(document.documentElement).getPropertyValue('--font-term').trim() || 'monospace',
       fontSize: 13, lineHeight: 1.2, cursorBlink: true, theme: this.theme(), scrollback: 5000,
       allowProposedApi: true, // unicode11 宽度 API 需要
+      // claude/codex 等 TUI 会开启鼠标上报，鼠标拖拽被程序吃掉 → 默认无法选中文字。
+      // 开这个开关后按住 Option 拖拽即可强制选中复制（iTerm/VS Code 终端同款约定）
+      macOptionClickForcesSelection: true,
       // agent 常输出按深色终端设计的 256 色/真彩（如淡蓝路径），在浅色皮肤上几乎隐形；
       // 自动把对比度不足的前景色压暗/提亮到 4.5:1（WCAG AA，VS Code 终端同款默认值）
       minimumContrastRatio: 4.5,
@@ -2600,6 +2603,10 @@ const term = {
           }
           // 截断路径直接创建链接，避免验证失败导致无法点击
           truncated.forEach((x) => push(x.s, x.e, x.cand, x.tail));
+          // 目录候选（结尾 /）：和带扩展名的裸文件名享受同等兜底——验证通过则用精确路径，
+          // 验证失败（终端 cwd 与打印的相对路径基准不一致时常见）也保留链接，点开走 basename 搜索。
+          // 文件靠扩展名白名单兜底，目录没扩展名，全靠结尾 / 这个强信号（散文几乎不这么写）。
+          const dirCands = r2.filter((x) => x.cand.endsWith('/'));
           const finish = () => {
             // 3. 裸文件名：unicode 字符类（调研.md 能点）+ 扩展名白名单（e.g/node.js 不误报）。
             // 紧跟斜杠路径、只隔空格的裸名多半是同一带空格路径的后半段：点哪段都按完整串定位
@@ -2612,6 +2619,8 @@ const term = {
               if (prev) push(mm.index, end, t.slice(prev.s, end), t.slice(end).split(/['"`]/)[0].slice(0, 160));
               else push(mm.index, end, mm[0], '');
             }
+            // 验证未命中的目录候选再兜一刀（已被 apply 精确链接的会被 overlaps 跳过）
+            dirCands.forEach((x) => push(x.s, x.e, x.cand, x.tail));
             cb(links.length ? links : undefined);
           };
           if (!r2.length) { finish(); return; }
