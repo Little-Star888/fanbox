@@ -12,8 +12,8 @@
 
 <br>
 
-**vibe coding 的驾驶舱：左边文件，右边/下边终端，中间看清每一次改动。**<br>
-**The cockpit for vibe coding: browse files on the left, command agents on the right, watch every change in between.**
+**看得见的 vibe coding：AI 在你电脑上飞快干活，你看清它碰过的每个文件、改过的每一行，随时接手。**<br>
+**Vibe coding you can actually see: watch every file and line the AI changes on your machine, and take over anytime.**
 
 <br>
 
