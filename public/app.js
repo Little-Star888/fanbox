@@ -2124,7 +2124,7 @@ function bindTerminalResizer() {
     if (term.maximized) {
       term.maximized = false;
       $('#main-body').classList.remove('term-max');
-      const b = $('#term-max'); if (b) { b.classList.remove('on'); b.title = '终端铺满'; }
+      const b = $('#term-max'); if (b) { b.classList.remove('on'); b.title = '终端铺满（⌘⇧M）'; }
     }
     squeeze = $('#main-body').classList.contains('fm-squeezed');
     handle.classList.add('dragging');
@@ -2742,6 +2742,13 @@ function bindEvents() {
     const cmdkOpen = !$('#cmdk').classList.contains('hidden');
     const lbOpen = !!document.querySelector('.lightbox');
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); cmdkOpen ? cmdk.close() : cmdk.open(); return; }
+    // ⌘⇧M 终端铺满/还原（只认 ⌘，Ctrl 组合留给终端里的 TUI）；终端收着时先打开再铺满
+    if (e.metaKey && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
+      e.preventDefault();
+      if ($('#terminal-panel').classList.contains('hidden')) { term.open(); term.toggleMax(true); }
+      else term.toggleMax();
+      return;
+    }
     if (cmdkOpen) {
       if (e.key === 'Escape') cmdk.close();
       else if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.move(1); }
@@ -3210,7 +3217,7 @@ const term = {
     this.maximized = force === undefined ? !this.maximized : force;
     $('#main-body').classList.toggle('term-max', this.maximized);
     const b = $('#term-max');
-    if (b) { b.classList.toggle('on', this.maximized); b.title = this.maximized ? '还原终端' : '终端铺满'; }
+    if (b) { b.classList.toggle('on', this.maximized); b.title = this.maximized ? '还原终端（⌘⇧M）' : '终端铺满（⌘⇧M）'; }
     this.fitActive();
   },
   // 在指定目录开终端（新标签）；浏览器版降级到系统终端。返回新 session（spawn 完成后）
