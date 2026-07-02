@@ -1904,29 +1904,44 @@ function truncNote() {
 
 // ---------- 命令面板 ----------
 const cmdk = {
-  results: [], active: 0, timer: null, scopeAll: true,
+  results: [], active: 0, timer: null, scopeAll: true, contentMode: false,
   open() {
     $('#cmdk').classList.remove('hidden');
     this.updateScopeLabel();
+    this.updateModeLabel();
     const inp = $('#cmdk-input');
     inp.value = '';
     inp.focus();
-    $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索 · 文件名模糊匹配，「内容:」搜全文（含 PDF、截图里的文字）</div>';
+    $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`;
     this.results = [];
     this.active = 0;
   },
   close() { $('#cmdk').classList.add('hidden'); },
   toggleScope() { this.scopeAll = !this.scopeAll; this.updateScopeLabel(); this.search($('#cmdk-input').value); },
+  // 全文搜索开关：点「搜内容」或 ⇧Tab 即切换，不用再手输「内容:」前缀（前缀仍兼容）
+  toggleMode() { this.contentMode = !this.contentMode; this.updateModeLabel(); this.search($('#cmdk-input').value); },
   root() { return this.scopeAll ? state.home : (state.cwd || state.home); },
   updateScopeLabel() {
     $('#cmdk-scope').textContent = this.scopeAll ? '全机（主目录及以下）' : '当前目录 ' + tilde(state.cwd || state.home);
     $('#scope-toggle').textContent = this.scopeAll ? '⤢ 全机' : '▢ 当前目录';
     $('#scope-toggle').classList.toggle('on', this.scopeAll);
   },
+  updateModeLabel() {
+    $('#mode-toggle').classList.toggle('on', this.contentMode);
+    $('#cmdk-input').placeholder = this.contentMode
+      ? '搜文件内容（全文，含 PDF、截图里的文字）…'
+      : '按文件名搜索…   用 “内容:” 前缀搜文件内容，如 “内容:useState”';
+    if (!$('#cmdk-input').value.trim()) $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`;
+  },
+  emptyHint() {
+    return this.contentMode
+      ? '输入开始搜索 · 全文搜索（含 PDF、截图里的文字）'
+      : '输入开始搜索 · 文件名模糊匹配，点「搜内容」或用「内容:」前缀搜全文（含 PDF、截图里的文字）';
+  },
   search(q) {
     clearTimeout(this.timer);
-    if (!q.trim()) { $('#cmdk-results').innerHTML = '<div class="cmdk-loading">输入开始搜索</div>'; return; }
-    const isContent = /^(内容[:：]|content:)/i.test(q);
+    if (!q.trim()) { $('#cmdk-results').innerHTML = `<div class="cmdk-loading">${this.emptyHint()}</div>`; return; }
+    const isContent = this.contentMode || /^(内容[:：]|content:)/i.test(q);
     $('#cmdk-results').innerHTML = '<div class="cmdk-loading">搜索中…</div>';
     this.timer = setTimeout(async () => {
       const root = this.root();
@@ -2510,6 +2525,7 @@ function bindEvents() {
   document.addEventListener('click', (e) => { if (!e.target.closest('#context-menu')) closeContextMenu(); });
   window.addEventListener('blur', closeContextMenu);
   $('#scope-toggle').onclick = () => cmdk.toggleScope();
+  $('#mode-toggle').onclick = () => { cmdk.toggleMode(); $('#cmdk-input').focus(); };
 
   $('#toggle-hidden').checked = state.showHidden;
   $('#toggle-hidden').onchange = (e) => { state.showHidden = e.target.checked; localStorage.setItem('fb_hidden', state.showHidden ? '1' : '0'); renderFiles(); };
@@ -2550,7 +2566,7 @@ function bindEvents() {
       if (e.key === 'Escape') cmdk.close();
       else if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.move(1); }
       else if (e.key === 'ArrowUp') { e.preventDefault(); cmdk.move(-1); }
-      else if (e.key === 'Tab') { e.preventDefault(); cmdk.toggleScope(); }
+      else if (e.key === 'Tab') { e.preventDefault(); e.shiftKey ? cmdk.toggleMode() : cmdk.toggleScope(); }
       else if (e.key === 'Enter') { e.preventDefault(); cmdk.choose(cmdk.active, e.metaKey || e.ctrlKey); }
       return;
     }
