@@ -2253,9 +2253,9 @@ function bindTerminalResizer() {
 
 // ---------- 微信 ClawBot：终端内的 IM 界面（设计方向 A）。桌面输入直连本机 claude/codex，可选连手机微信遥控 ----------
 const wechatView = {
-  offMsg: null, offQr: null, offConn: null, offExpired: null, offPower: null, onKey: null, onDoc: null,
+  offMsg: null, offQr: null, offConn: null, offExpired: null, onKey: null, onDoc: null,
   target: 'codex', targets: [], connected: false, cwdName: '', menuOpen: false,
-  connState: 'unknown', stayAwake: false, platform: '',
+  connState: 'unknown',
   el() { return $('#wechat-view'); },
   shown() { const e = this.el(); return e && !e.classList.contains('hidden'); },
   toggle() { this.shown() ? this.close() : this.open(); },
@@ -2277,9 +2277,6 @@ const wechatView = {
     this.offMsg = window.fanboxWechat.onMessage(() => this.loadChat());
     // 连接失效（轮询/探活发现 token 掉了）→ 立刻翻红 + 弹重连横幅，不让用户对着死连接干瞪眼
     this.offExpired = window.fanboxWechat.onExpired ? window.fanboxWechat.onExpired(() => this.setConn('expired')) : null;
-    // 免密规则丢失等导致后端强制关掉「不待机」→ 同步开关 UI
-    this.offPower = window.fanboxWechat.onPower ? window.fanboxWechat.onPower((m) => { this.stayAwake = !!(m && m.stayAwake); this.syncAwake(); }) : null;
-    this.loadPower();
     await this.detect();
   },
   close() {
@@ -2291,7 +2288,6 @@ const wechatView = {
   teardown() {
     if (this.offMsg) { this.offMsg(); this.offMsg = null; }
     if (this.offExpired) { this.offExpired(); this.offExpired = null; }
-    if (this.offPower) { this.offPower(); this.offPower = null; }
     this.teardownScan();
     this.menuOpen = false;
   },
@@ -2307,7 +2303,6 @@ const wechatView = {
         <span class="wx-name">微信 ClawBot</span>
         <span class="wx-status" id="wx-status"></span>
         <span class="wx-spacer"></span>
-        <button class="wx-awake hidden" id="wx-awake">🌙 离开不待机</button>
         <span class="wx-brain" id="wx-brain">连到 Codex <span class="caret">▾</span></span>
         <button class="wx-x" id="wx-close" title="收起（回到终端）">✕</button>
         <div class="wx-menu hidden" id="wx-menu"></div>
@@ -2331,11 +2326,9 @@ const wechatView = {
       </div>`;
     e.querySelector('#wx-close').onclick = () => this.close();
     e.querySelector('#wx-brain').onclick = (ev) => { ev.stopPropagation(); this.toggleMenu(); };
-    e.querySelector('#wx-awake').onclick = () => this.toggleAwake();
     e.querySelector('#wx-compact').onclick = (ev) => this.runCtxAction(ev.currentTarget, '整理中…', () => window.fanboxWechat.compact(), '已整理上下文');
     e.querySelector('#wx-new').onclick = (ev) => this.runCtxAction(ev.currentTarget, '处理中…', () => window.fanboxWechat.newConversation(), '已开启新对话');
     e.querySelector('#wx-reconnect-btn').onclick = () => this.connectPhone();
-    this.syncAwake();
     this.onDoc = (ev) => { if (this.menuOpen && !ev.target.closest('#wx-menu') && !ev.target.closest('#wx-brain')) this.closeMenu(); };
     document.addEventListener('click', this.onDoc, true);
   },
@@ -2386,30 +2379,6 @@ const wechatView = {
     const e = this.el(); if (!e) return;
     const brain = e.querySelector('#wx-brain'); if (brain) brain.innerHTML = `连到 ${escapeHtml(this.label(this.target))} <span class="caret">${this.menuOpen ? '▴' : '▾'}</span>`;
     this.applyConn();
-  },
-  // 「离开不待机」开关
-  async loadPower() {
-    if (!window.fanboxWechat.powerState) return;
-    const p = await window.fanboxWechat.powerState().catch(() => ({}));
-    this.platform = p.platform || (window.fanboxEnv && window.fanboxEnv.platform) || '';
-    this.stayAwake = !!p.stayAwake;
-    this.syncAwake();
-  },
-  syncAwake() {
-    const e = this.el(); if (!e) return;
-    const btn = e.querySelector('#wx-awake'); if (!btn) return;
-    const mac = (this.platform || (window.fanboxEnv && window.fanboxEnv.platform)) === 'darwin';
-    btn.classList.toggle('hidden', !mac); // 仅 macOS 支持（pmset 禁休眠）
-    btn.classList.toggle('on', this.stayAwake);
-    btn.textContent = this.stayAwake ? '🌙 离开不待机 · 开' : '🌙 离开不待机';
-    btn.title = this.stayAwake
-      ? '已开启：微信连着时，合盖 / 息屏也不休眠，离开电脑也能远程操控。点击关闭'
-      : '开启后离开电脑也能用微信遥控：合盖 / 息屏不休眠（断开微信自动恢复）';
-  },
-  async toggleAwake() {
-    const r = await window.fanboxWechat.setStayAwake(!this.stayAwake).catch(() => ({}));
-    if (r && r.ok) { this.stayAwake = !!r.on; this.syncAwake(); toast(this.stayAwake ? '已开启 · 离开也能用微信遥控本机' : '已关闭 · 恢复正常休眠'); }
-    else { this.stayAwake = !!(r && r.on); this.syncAwake(); if (r && r.error && r.error !== 'cancelled' && r.error !== 'setup-cancelled') toast('开启失败：' + r.error, true); }
   },
   toggleMenu() { this.menuOpen ? this.closeMenu() : this.openMenu(); },
   openMenu() {
@@ -5012,6 +4981,152 @@ if (window.fanboxFs) {
 }
 
 // ---------- 启动 ----------
+// ---------- 侧栏悬停解释卡：比原生 title 更快出现、能排版，鼠标移开即散 ----------
+function sideHoverCard(el, build) {
+  let card = null;
+  const hide = () => { if (card) { card.remove(); card = null; } };
+  el.addEventListener('mouseenter', () => {
+    hide();
+    card = document.createElement('div');
+    card.className = 'side-tip';
+    card.innerHTML = build();
+    document.body.appendChild(card);
+    const r = el.getBoundingClientRect();
+    let left = r.right + 10;
+    if (left + card.offsetWidth > window.innerWidth - 8) left = Math.max(8, window.innerWidth - card.offsetWidth - 8);
+    card.style.left = left + 'px';
+    card.style.top = Math.max(8, Math.min(r.top, window.innerHeight - card.offsetHeight - 8)) + 'px';
+  });
+  el.addEventListener('mouseleave', hide);
+  el.addEventListener('click', hide);
+  window.addEventListener('blur', hide);
+}
+
+// ---------- 侧栏「离开电脑」：合盖继续干活 / 微信遥控不断线（macOS 桌面版专属）----------
+const powerBar = {
+  st: null,
+  async init() {
+    if (!window.fanboxPower) return; // 浏览器版 / 老 preload：整段不显示
+    const st = await window.fanboxPower.state().catch(() => null);
+    if (!st || st.platform !== 'darwin') return; // 禁休眠靠 pmset，仅 macOS
+    this.st = st;
+    $('#power-sec').classList.remove('hidden');
+    $('#pw-lid').onclick = () => this.flip('lid');
+    $('#pw-wechat').onclick = () => this.flip('wechat');
+    sideHoverCard($('#pw-lid'), () => this.tipLid());
+    sideHoverCard($('#pw-wechat'), () => this.tipWechat());
+    window.fanboxPower.onChange((m) => { this.st = m; this.sync(); });
+    this.sync();
+  },
+  async flip(kind) {
+    const st = this.st || {};
+    const on = !(kind === 'lid' ? st.lid : st.wechat);
+    const r = await (kind === 'lid' ? window.fanboxPower.setLid(on) : window.fanboxPower.setWechat(on)).catch(() => null);
+    if (r) { this.st = r; this.sync(); }
+    if (r && r.ok) {
+      if (kind === 'lid') toast(r.on ? '已开启 · agent 干活时合盖不休眠' : '已关闭 · 合盖照常休眠');
+      else toast(r.on ? '已开启 · 微信连着时不休眠' : '已关闭 · 恢复正常休眠');
+    } else if (r && r.error && r.error !== 'cancelled' && r.error !== 'setup-cancelled') toast('开启失败：' + r.error, true);
+  },
+  sync() {
+    const st = this.st; if (!st) return;
+    const row = (id, on, lit) => {
+      const el = $(id); if (!el) return;
+      el.querySelector('.pw-switch').classList.toggle('on', on);
+      el.querySelector('.pw-dot').classList.toggle('lit', lit);
+    };
+    row('#pw-lid', !!st.lid, !!st.lidHolding);
+    row('#pw-wechat', !!st.wechat, !!st.wechatHolding);
+  },
+  tipLid() {
+    const st = this.st || {};
+    let now;
+    if (!st.lid) now = '现在：未开启，合盖照常休眠';
+    else if (st.lidHolding) now = `现在：${st.terms} 个终端开着，agent 正在干活 → 生效中，合盖也不休眠`;
+    else if (st.terms > 0) now = `现在：${st.terms} 个终端开着但都空闲 → 合盖照常休眠`;
+    else now = '现在：没有终端会话 → 合盖照常休眠';
+    return `<b>合盖继续干活</b>
+      <p>翻箱盯着每个终端窗口的工作状态。开启后：只要检测到有 agent 正在干活，合上盖子 Mac 也不休眠，任务接着跑；所有终端都空闲约两分钟后，自动恢复正常休眠——不会让 Mac 一直不睡。</p>
+      <p class="tip-note">合盖跑任务持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。</p>
+      <p class="tip-state">${escapeHtml(now)}</p>`;
+  },
+  tipWechat() {
+    const st = this.st || {};
+    let now;
+    if (!st.wechat) now = '现在：未开启，合盖照常休眠';
+    else if (st.wechatHolding) now = '现在：微信已连接 → 生效中，合盖 / 息屏也不休眠';
+    else now = '现在：微信未连接 → 暂不生效，连上后自动开始守护';
+    return `<b>微信遥控不断线</b>
+      <p>开启后，手机微信连着 ClawBot 期间，合盖 / 息屏也不休眠——人在外面也能一直用微信遥控本机的 Claude Code / Codex；微信断开自动恢复正常休眠。</p>
+      <p class="tip-note">持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。</p>
+      <p class="tip-state">${escapeHtml(now)}</p>`;
+  },
+};
+
+// ---------- 版本号与版本历史：brand 旁小版本标，悬停看最新更新，点击看全部 ----------
+const verInfo = {
+  data: null,
+  async init() {
+    let d = null;
+    try { d = await api('/api/changelog'); } catch { /* 服务端没这接口就不显示 */ }
+    if (!d || !d.ok) return;
+    this.data = d;
+    const el = $('#ver-tag');
+    el.textContent = 'v' + d.version;
+    el.classList.remove('hidden');
+    el.onclick = (ev) => { ev.stopPropagation(); this.showAll(); };
+    sideHoverCard(el, () => this.tipHtml());
+  },
+  // Keep a Changelog 的英文分类词换成中文再渲染，用户不用猜 Added/Fixed 是啥
+  md(body) {
+    const zh = String(body || '')
+      .replace(/^### Added$/gm, '### 新增')
+      .replace(/^### Fixed$/gm, '### 修复')
+      .replace(/^### Changed$/gm, '### 改进')
+      .replace(/^### Removed$/gm, '### 移除')
+      .replace(/^### Deprecated$/gm, '### 弃用')
+      .replace(/^### Security$/gm, '### 安全');
+    return window.marked ? window.marked.parse(zh) : '<pre>' + escapeHtml(zh) + '</pre>';
+  },
+  tipHtml() {
+    const e = (this.data.entries || []).find((x) => x.version !== 'Unreleased' && x.body);
+    if (!e) return '<b>版本历史</b><p class="tip-note">点击查看全部版本更新</p>';
+    return `<b>v${escapeHtml(e.version)} 更新了什么</b><span class="tip-date">${escapeHtml(e.date || '')}</span>
+      <div class="tip-md">${this.md(e.body)}</div>
+      <p class="tip-note">点击版本号查看完整版本历史</p>`;
+  },
+  showAll() {
+    const old = $('.clog-overlay'); if (old) old.remove();
+    const entries = (this.data.entries || []).filter((e) => e.body);
+    const cur = this.data.version;
+    const ov = document.createElement('div');
+    ov.className = 'input-overlay clog-overlay';
+    ov.innerHTML = `<div class="input-dialog clog-dialog">
+      <div class="input-title">版本历史<span class="clog-sub">最新在上</span></div>
+      <div class="clog-body">${entries.map((e) => `
+        <div class="clog-entry">
+          <div class="clog-head">
+            <span class="clog-ver">${e.version === 'Unreleased' ? '开发中 · 未发布' : 'v' + escapeHtml(e.version)}</span>
+            ${e.date ? `<span class="clog-date">${escapeHtml(e.date)}</span>` : ''}
+            ${e.version === cur ? '<span class="clog-curtag">当前版本</span>' : ''}
+          </div>
+          <div class="clog-md">${this.md(e.body)}</div>
+        </div>`).join('') || '<div class="empty-state">还没有版本记录</div>'}</div></div>`;
+    document.body.appendChild(ov);
+    const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); close(); } };
+    const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
+    ov.onclick = (ev) => { if (ev.target === ov) close(); };
+    document.addEventListener('keydown', onKey, true);
+    // 更新说明里的外链（GitHub、参考项目等）交给系统浏览器，别把 app 自己导航走
+    ov.querySelector('.clog-body').addEventListener('click', (ev) => {
+      const a = ev.target.closest('a'); if (!a) return;
+      ev.preventDefault();
+      const href = a.getAttribute('href') || '';
+      if (/^https?:/.test(href)) { window.fanboxUpdate ? window.fanboxUpdate.open(href) : window.open(href, '_blank'); }
+    });
+  },
+};
+
 async function init() {
   // 桌面 app：标记 body，给顶部交通灯留位、顶部可拖拽
   if (window.fanboxEnv && window.fanboxEnv.isDesktopApp) document.documentElement.classList.add('desktop');
@@ -5046,6 +5161,8 @@ async function init() {
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
   await loadRoots();
   await loadFavorites();
+  powerBar.init();
+  verInfo.init();
   loadAgentProjects();
   setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
   await navigate(state.home, false);

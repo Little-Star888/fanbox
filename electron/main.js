@@ -100,6 +100,8 @@ app.whenReady().then(() => {
   lidIntent = !!readConfig().lidStayAwake;
   wechatStayAwake = !!readConfig().wechatStayAwake;
   if (process.platform === 'darwin') trySetDisableSleep(false);
+  // agent 忙闲轮询：开着「合盖继续干活」时每 30s 结算一次（所有终端收工、缓冲到期后恢复休眠靠它）
+  setInterval(() => { if (lidIntent && terminals.size) refreshLidGuard(); }, 30000);
   buildMenu();
   try {
     const m = Menu.getApplicationMenu();
@@ -303,10 +305,44 @@ function writeConfig(patch) {
   try { const c = readConfig(); Object.assign(c, patch); fs.mkdirSync(path.dirname(CONFIG), { recursive: true }); fs.writeFileSync(CONFIG, JSON.stringify(c, null, 2)); }
   catch { /* 写失败不致命，下次再写 */ }
 }
-let lidIntent = false; // 用户意图（菜单勾选），跨会话持久
+let lidIntent = false; // 用户意图（侧栏/菜单勾选），跨会话持久
 let lidActive = false; // 当前是否已对系统下达禁休眠
-let wechatStayAwake = false; // 「离开不待机」开关（微信 ClawBot 面板），跨会话持久
+let wechatStayAwake = false; // 「微信遥控不断线」开关，跨会话持久
 let wechatConnected = false; // 微信 ClawBot 当前是否连着（bridge 回调更新）
+
+// ---- agent 工作状态检测：前台不是裸 shell = 终端里有东西在跑（和微信 termControl 同一判据）----
+const BARE_SHELL = /^-?(zsh|bash|sh|fish|login)$/i;
+function termBusyAny() {
+  for (const p of terminals.values()) {
+    const proc = (p && p.process) || '';
+    if (proc && !BARE_SHELL.test(proc)) return true;
+  }
+  return false;
+}
+// 收工不立刻放行休眠：agent 工具调用间隙 / 刚跑完下一句还没起，留 2 分钟缓冲防误判
+const IDLE_GRACE_MS = 2 * 60 * 1000;
+let lastBusyAt = 0;
+let lidPoke = null; // 终端一有输出就尽快结算（1s 去抖），刚启动的 agent 不用等 30s 轮询才被护住
+function termsBusyRecently() {
+  if (termBusyAny()) { lastBusyAt = Date.now(); return true; }
+  return lidActive && Date.now() - lastBusyAt < IDLE_GRACE_MS;
+}
+
+// 电源状态汇总：渲染层侧栏开关 + 状态点都吃这一份
+function powerPayload() {
+  const busy = termBusyAny();
+  return {
+    ok: true, platform: process.platform,
+    lid: lidIntent, wechat: wechatStayAwake, active: lidActive,
+    busy, terms: terminals.size, wechatConnected,
+    // 分条「正在生效」判定，侧栏状态点直接用（lid 侧含收工缓冲期）
+    lidHolding: lidIntent && terminals.size > 0 && (busy || (lidActive && Date.now() - lastBusyAt < IDLE_GRACE_MS)),
+    wechatHolding: wechatStayAwake && wechatConnected,
+  };
+}
+function sendPower() {
+  if (win && !win.isDestroyed()) win.webContents.send('power:changed', powerPayload());
+}
 
 // 用 sudo -n（非交互）切换；sudoers 没装好就直接失败、绝不在后台弹密码
 function trySetDisableSleep(on) {
@@ -352,49 +388,58 @@ async function ensurePmsetRule() {
   return installSudoers();
 }
 
-// 按「意图 × 触发条件」结算系统状态，幂等。终端起落、微信连断、开关变化都调它。
-//  两条独立诉求 OR 起来：① 合盖继续跑（要有终端在跑）② 离开不待机（微信连着就保持唤醒，断开自动恢复）
+// 按「意图 × 触发条件」结算系统状态，幂等。终端起落、agent 忙闲轮询、微信连断、开关变化都调它。
+//  两条独立诉求 OR 起来：① 合盖继续干活（要有 agent 正在干活）② 微信遥控不断线（微信连着就保持唤醒，断开自动恢复）
 function refreshLidGuard() {
   if (process.platform !== 'darwin') return;
-  const want = (lidIntent && terminals.size > 0) || (wechatStayAwake && wechatConnected);
-  if (want === lidActive) return;
-  const ok = trySetDisableSleep(want);
-  if (want && !ok) { // 免密规则丢了，两个开关都退回关闭，别让用户以为还护着
-    lidIntent = false; wechatStayAwake = false;
-    writeConfig({ lidStayAwake: false, wechatStayAwake: false });
-    if (win && !win.isDestroyed()) win.webContents.send('wechat:power', { stayAwake: false, active: false });
+  const want = (lidIntent && terminals.size > 0 && termsBusyRecently()) || (wechatStayAwake && wechatConnected);
+  if (want !== lidActive) {
+    const ok = trySetDisableSleep(want);
+    if (want && !ok) { // 免密规则丢了，两个开关都退回关闭，别让用户以为还护着
+      lidIntent = false; wechatStayAwake = false;
+      writeConfig({ lidStayAwake: false, wechatStayAwake: false });
+    }
+    lidActive = want && ok;
+    buildMenu();
   }
-  lidActive = want && ok;
-  buildMenu();
+  sendPower();
 }
 
-// 菜单勾选/取消的入口
+// 侧栏开关 / 菜单勾选共用的入口
 async function setLidIntent(on) {
   console.log('[lid] setLidIntent called, on =', on);
-  if (process.platform !== 'darwin') return;
+  if (process.platform !== 'darwin') return { ok: false, error: 'macOS only' };
   if (on) {
     const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
       type: 'warning', buttons: [M('开启', 'Enable'), M('取消', 'Cancel')], defaultId: 0, cancelId: 1,
-      message: M('合盖后继续运行', 'Keep running with lid closed'),
-      detail: M('开启后，只要还有终端会话在跑，合上盖子也不会休眠——agent 任务能接着干。\n\n注意：合盖期间持续耗电发热，建议接电源。终端全部退出或退出翻箱时自动恢复正常休眠。\n\n首次开启需输入一次管理员密码（装一条仅限电源设置的免密规则）。',
-        'While any terminal session is running, closing the lid won\'t sleep the Mac — your agent tasks keep going.\n\nNote: it keeps drawing power and heat while closed; stay plugged in. Normal sleep is restored once all terminals exit or you quit FanBox.\n\nFirst time needs your admin password once (installs a power-only passwordless rule).'),
+      message: M('Agent 干活时，合盖继续', 'Keep working with lid closed'),
+      detail: M('翻箱能看到每个终端窗口的工作状态。开启后：只要检测到有 agent 正在干活，合上盖子也不休眠，任务接着跑；所有终端都空闲约两分钟后，自动恢复正常休眠——不会让 Mac 一直不睡。\n\n注意：合盖期间持续耗电发热，建议接电源。\n\n首次开启需输入一次管理员密码（装一条仅限电源设置的免密规则）。',
+        'FanBox watches what each terminal is doing. When any agent is actively working, closing the lid won\'t sleep the Mac — the task keeps going. Once every terminal has been idle for ~2 minutes, normal sleep resumes automatically.\n\nNote: it keeps drawing power and heat while closed; stay plugged in.\n\nFirst time needs your admin password once (installs a power-only passwordless rule).'),
     });
     console.log('[lid] warning dialog choice =', choice, '(0=开启)');
-    if (choice !== 0) { buildMenu(); return; } // 取消 → 复位勾选
+    if (choice !== 0) { buildMenu(); sendPower(); return { ok: false, error: 'cancelled' }; } // 取消 → 复位勾选
     // 探针：能否免密 sudo（设 0 无害）。不行就装规则。
     const probe = trySetDisableSleep(false);
     console.log('[lid] sudo probe ok =', probe, '→', probe ? '已有免密规则' : '需安装');
     if (!probe) {
       const installed = await installSudoers();
       console.log('[lid] installSudoers result =', installed);
-      if (!installed) { buildMenu(); return; } // 装失败/取消 → 保持关闭
+      if (!installed) { buildMenu(); sendPower(); return { ok: false, error: 'setup-cancelled' }; } // 装失败/取消 → 保持关闭
     }
   }
-  lidIntent = on;
-  writeConfig({ lidStayAwake: on });
+  lidIntent = !!on;
+  writeConfig({ lidStayAwake: !!on });
   refreshLidGuard();
   buildMenu();
+  return { ok: true, on: lidIntent };
 }
+
+// 侧栏「离开电脑」两个开关的 IPC（微信开关的 handler 在下方微信段，要联动 bridge）
+ipcMain.handle('power:state', () => powerPayload());
+ipcMain.handle('power:setLid', async (e, { on } = {}) => {
+  const r = await setLidIntent(!!on);
+  return { ...powerPayload(), ...r };
+});
 
 // 原生菜单——关键是 Edit role，终端里的 ⌘C/⌘V 才生效
 function buildMenu() {
@@ -422,8 +467,8 @@ function buildMenu() {
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
       { type: 'separator' }, { role: 'togglefullscreen', label: M('全屏', 'Full Screen') },
       ...(isMac ? [{ type: 'separator' }, {
-        // 合盖后继续运行：仅在有终端跑着时真正生效（智能模式）；勾选状态反映用户意图
-        label: lidActive ? M('合盖后继续运行（生效中）', 'Keep running with lid closed (active)') : M('合盖后继续运行', 'Keep running with lid closed'),
+        // 合盖继续干活：仅在检测到 agent 正在干活时真正生效（智能模式）；勾选状态反映用户意图
+        label: lidActive ? M('合盖继续干活（生效中）', 'Keep working with lid closed (active)') : M('合盖继续干活', 'Keep working with lid closed'),
         type: 'checkbox', checked: lidIntent,
         click: (item) => { setLidIntent(item.checked); },
       }] : []),
@@ -551,6 +596,8 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
   recStart(id, { cols, rows, cwd: startCwd, theme });
   p.onData((data) => {
     if (win && !win.isDestroyed()) win.webContents.send('pty:data', { id, data });
+    // 开关开着但还没生效 → 有输出说明可能刚开工，尽快结算电源守卫（1s 去抖）
+    if (lidIntent && !lidActive && !lidPoke) lidPoke = setTimeout(() => { lidPoke = null; refreshLidGuard(); }, 1000);
     recEvent(id, 'o', data);
     const stripped = data.replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b[()][AB0]|\r/g, '');
     termTails.set(id, ((termTails.get(id) || '') + stripped).slice(-4000)); // 留最后 ~4KB，给微信 agent 看「最近输出」
@@ -977,8 +1024,8 @@ ipcMain.handle('wechat:disconnect', async () => { ensureWechat(); return wechatB
 ipcMain.handle('wechat:cancel', () => ({ ok: true }));
 ipcMain.handle('wechat:check', async () => { ensureWechat(); return wechatBridge.check(); }); // 主动探活，返回 { state }
 
-// 「离开不待机」开关：开启时（首次需管理员密码装免密规则）+ 微信连着 → 禁休眠，息屏/合盖也能远程操控
-ipcMain.handle('wechat:setStayAwake', async (e, { on } = {}) => {
+// 「微信遥控不断线」开关：开启时（首次需管理员密码装免密规则）+ 微信连着 → 禁休眠，息屏/合盖也能远程操控
+ipcMain.handle('power:setWechat', async (e, { on } = {}) => {
   ensureWechat();
   if (process.platform !== 'darwin') return { ok: false, error: 'macOS only' };
   if (on) {
@@ -988,17 +1035,16 @@ ipcMain.handle('wechat:setStayAwake', async (e, { on } = {}) => {
       detail: M('开启后，只要微信 ClawBot 还连着，合盖 / 息屏也不休眠——你能一直用手机微信遥控本机的 Claude Code / Codex。\n\n注意：持续耗电发热，建议接电源。断开微信、或关掉这个开关，自动恢复正常休眠。\n\n首次开启需输入一次管理员密码（装一条仅限电源设置的免密规则）。',
         'While WeChat ClawBot stays connected, closing the lid / screen off won\'t sleep the Mac — you can keep remote-controlling Claude Code / Codex from your phone.\n\nNote: it keeps drawing power and heat; stay plugged in. Disconnecting WeChat or turning this off restores normal sleep.\n\nFirst time needs your admin password once (installs a power-only passwordless rule).'),
     });
-    if (choice !== 0) return { ok: false, error: 'cancelled', on: wechatStayAwake };
+    if (choice !== 0) return { ...powerPayload(), ok: false, error: 'cancelled' };
     const ruleOk = await ensurePmsetRule();
-    if (!ruleOk) return { ok: false, error: 'setup-cancelled', on: wechatStayAwake };
+    if (!ruleOk) return { ...powerPayload(), ok: false, error: 'setup-cancelled' };
   }
   wechatStayAwake = !!on;
   writeConfig({ wechatStayAwake });
   try { wechatConnected = wechatBridge.isConnected(); } catch { /* */ }
   refreshLidGuard();
-  return { ok: true, on: wechatStayAwake, active: lidActive, connected: wechatConnected };
+  return { ...powerPayload(), ok: true, on: wechatStayAwake };
 });
-ipcMain.handle('wechat:powerState', () => ({ ok: true, stayAwake: wechatStayAwake, active: lidActive, platform: process.platform }));
 
 // ---------- 文件监听（agent 改文件 → 自动刷新 + 跨项目变更收件箱）----------
 // 多目录监听：浏览目录 + 每个终端会话所在的项目目录。一下午开多个项目跑 agent 时，
