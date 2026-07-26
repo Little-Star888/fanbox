@@ -179,15 +179,17 @@ async function fetchLatestRelease() {
     });
     if (res.ok) {
       const rel = await res.json();
-      if (rel.tag_name) return { tag: rel.tag_name, url: rel.html_url || REL_PAGE };
+      // 顺带带上资产清单（网页兜底那条路拿不到，那时为 null 表示「不知道」）
+      if (rel.tag_name) return { tag: rel.tag_name, url: rel.html_url || REL_PAGE, assets: (rel.assets || []).map((a) => a.name) };
     }
   } catch { /* 走兜底 */ }
   const res = await net.fetch(REL_PAGE, { headers: { 'User-Agent': 'fanbox-app' } });
   const m = String(res.url || '').match(/\/releases\/tag\/([^/?#]+)/);
-  if (m) return { tag: decodeURIComponent(m[1]), url: res.url };
+  if (m) return { tag: decodeURIComponent(m[1]), url: res.url, assets: null };
   return null;
 }
 let pendingUpdate = null; // 渲染层晚注册监听也能拉到（启动 6 秒的推送 vs init 加载大目录，谁先谁后说不准）
+let latestAssets = null; // 最新 Release 的资产文件名清单；null = 没拿到（走了网页兜底），此时不拦下载
 let updRetry = 0;
 let lastAutoCheck = 0;
 async function checkUpdate(opts) {
@@ -208,6 +210,7 @@ async function checkUpdate(opts) {
   const newer = cmpVer(info.tag, app.getVersion()) > 0;
   if (newer) {
     pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url };
+    latestAssets = Array.isArray(info.assets) ? info.assets : null;
     if (win && !win.isDestroyed()) win.webContents.send('update:available', pendingUpdate);
   }
   if (manual) {
@@ -238,8 +241,15 @@ ipcMain.handle('update:download', async (e, { version }) => {
   const ver = String(version || '').replace(/^v/, '');
   if (!/^\d+\.\d+\.\d+$/.test(ver)) return { ok: false, error: 'bad version' };
   const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  const url = `https://github.com/alchaincyf/fanbox/releases/download/v${ver}/FanBox-${ver}-${arch}.dmg`;
-  const dest = path.join(app.getPath('downloads'), `FanBox-${ver}-${arch}.dmg`);
+  const name = `FanBox-${ver}-${arch}.dmg`;
+  // 这个 Release 没发当前架构的包时（x64 产物最后一次是 v2.5.0），别甩个必然 404 的地址给用户：
+  // 直接开发布页，让渲染层说明一句。资产清单没拿到（走了网页兜底）就不拦，照旧试下载
+  if (latestAssets && pendingUpdate && pendingUpdate.version === ver && !latestAssets.includes(name)) {
+    shell.openExternal(pendingUpdate.url || REL_PAGE);
+    return { ok: false, error: 'no-asset', arch };
+  }
+  const url = `https://github.com/alchaincyf/fanbox/releases/download/v${ver}/${name}`;
+  const dest = path.join(app.getPath('downloads'), name);
   const send = (m) => { if (win && !win.isDestroyed()) win.webContents.send('update:progress', m); };
   updDownloading = true;
   const tmp = dest + '.part';
