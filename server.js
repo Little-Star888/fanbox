@@ -648,8 +648,10 @@ async function releasePrepare(b) {
 }
 
 // ---------- 项目记忆：这个文件夹里 AI 干过什么 ----------
-// 数据源：~/.claude/projects/<munge(cwd)>/*.jsonl + ~/.codex/sessions/**/rollout-*.jsonl（头部 cwd 匹配）。
-// 单会话解析结果按 (size, mtime) 缓存，再次打开只重解析有变化的文件。
+// 数据源：~/.claude/projects/<munge(cwd)>/*.jsonl + ~/.codex/sessions/**/rollout-*.jsonl（头部 cwd 匹配）
+//        + ~/.kimi-code/session_index.jsonl（全局索引→state.json）+ ~/.local/share/opencode/storage/session/**/ses_*.json（directory 字段匹配）。
+// 单会话解析结果按 (size, mtime) 缓存，再次打开只重解析有变化的文件。统一会话对象 {id, agent, title, firstT, lastT, userMsgs, files, skills}。
+// userMsgs 允许为 null 表示「未统计」（kimi/opencode 只读元数据不解析消息正文），前端遇到 null 不渲染条数；0 保留给「确实数过是零条」。
 const projMemCache = new Map(); // file -> { size, mtimeMs, sess }
 const mungeClaudeDir = (cwd) => cwd.replace(/[^A-Za-z0-9]/g, '-');
 
@@ -742,6 +744,69 @@ async function parseCodexSession(fp, st) {
   return sess;
 }
 
+// Kimi Code 适配器：~/.kimi-code/session_index.jsonl 是现成的全局索引（sessionId → sessionDir + workDir），
+// 按 workDir 过滤后逐个读 state.json 拿标题/时间戳，完全不用碰 wire.jsonl 协议日志。
+// 消息数/改过的文件埋在 wire.jsonl 里（协议带版本号 1.4，会漂移），列表页不值得挖——给默认值。
+const KIMI_HOME = path.join(HOME, '.kimi-code');
+async function listKimiSessions(cwd) {
+  const out = [];
+  let idx;
+  try { idx = await fsp.readFile(path.join(KIMI_HOME, 'session_index.jsonl'), 'utf8'); } catch { return out; } // 没装/没用过 Kimi Code
+  for (const line of idx.split('\n')) {
+    if (!line.includes('"workDir"')) continue;
+    let rec;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (rec.workDir !== cwd || !rec.sessionId || !rec.sessionDir) continue;
+    const fp = path.join(String(rec.sessionDir), 'state.json');
+    try {
+      const st = await fsp.stat(fp);
+      const hit = projMemCache.get(fp);
+      if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { out.push(hit.sess); continue; }
+      const d = JSON.parse(await fsp.readFile(fp, 'utf8'));
+      const title = String(d.title || d.lastPrompt || '').trim().slice(0, 160);
+      const sess = { id: rec.sessionId, agent: 'kimi', title, firstT: Date.parse(d.createdAt) || 0, lastT: Date.parse(d.updatedAt) || st.mtimeMs, userMsgs: null, files: [], skills: [] };
+      projMemCache.set(fp, { size: st.size, mtimeMs: st.mtimeMs, sess });
+      out.push(sess);
+    } catch { /* 单条会话坏了不拖垮整个列表 */ }
+  }
+  return out;
+}
+
+// opencode 适配器：~/.local/share/opencode/storage/session/<projectID>/ses_*.json 单文件即全部元数据，
+// 按 JSON 里的 directory 字段过滤（目录名是 projectID hash，没法从 cwd 正向算，只能全扫——文件小，先 stat 排序封顶控 IO）。
+// summary.files 只有改动数量没有路径列表，前端要的是可点击的路径，所以 files 给空数组。
+const OPENCODE_SESS = path.join(HOME, '.local', 'share', 'opencode', 'storage', 'session');
+async function listOpencodeSessions(cwd) {
+  const out = [];
+  let projDirs;
+  try { projDirs = await fsp.readdir(OPENCODE_SESS, { withFileTypes: true }); } catch { return out; } // 没装/没用过 opencode
+  const files = [];
+  for (const pd of projDirs) {
+    if (!pd.isDirectory()) continue;
+    let names;
+    try { names = await fsp.readdir(path.join(OPENCODE_SESS, pd.name)); } catch { continue; }
+    for (const n of names) {
+      if (!n.startsWith('ses_') || !n.endsWith('.json')) continue;
+      const fp = path.join(OPENCODE_SESS, pd.name, n);
+      try { files.push({ fp, st: await fsp.stat(fp) }); } catch { /* */ }
+    }
+  }
+  files.sort((a, b) => b.st.mtimeMs - a.st.mtimeMs);
+  for (const { fp, st } of files.slice(0, 200)) {
+    try {
+      const hit = projMemCache.get(fp);
+      if (hit && hit.size === st.size && hit.mtimeMs === st.mtimeMs) { if (hit.dir === cwd) out.push(hit.sess); continue; }
+      const d = JSON.parse(await fsp.readFile(fp, 'utf8'));
+      const dir = String(d.directory || '');
+      const t = d.time || {};
+      const sess = { id: String(d.id || path.basename(fp, '.json')), agent: 'opencode', title: String(d.title || '').trim().slice(0, 160), firstT: Number(t.created) || 0, lastT: Number(t.updated) || st.mtimeMs, userMsgs: null, files: [], skills: [] };
+      projMemCache.set(fp, { size: st.size, mtimeMs: st.mtimeMs, sess, dir });
+      if (dir === cwd) out.push(sess);
+    } catch { /* 单条会话坏了不拖垮整个列表 */ }
+  }
+  return out;
+}
+
 async function projectMemory(p) {
   const cwd = resolvePath(p);
   const sessions = [];
@@ -775,6 +840,9 @@ async function projectMemory(p) {
       try { if ((await readCwdFromHead(fp, 16384)) === cwd) sessions.push(await parseCodexSession(fp, st)); } catch { /* */ }
     }
   } catch { /* 没用过 Codex */ }
+  // Kimi Code / opencode：适配器内部已各自兜底，这里再包一层——任何一家格式漂移都不拖垮整个面板
+  try { sessions.push(...await listKimiSessions(cwd)); } catch { /* */ }
+  try { sessions.push(...await listOpencodeSessions(cwd)); } catch { /* */ }
   // 没有正经标题的会话（纯 warmup / 空会话）沉底，按最近活跃排
   sessions.sort((a, b) => (b.title ? 1 : 0) - (a.title ? 1 : 0) || b.lastT - a.lastT);
   sessions.sort((a, b) => b.lastT - a.lastT);
@@ -1359,17 +1427,81 @@ async function pruneThumbs(maxBytes = 400 * 1024 * 1024) {
 
 // 排版档把图片转 base64 时用：渲染进程受同源策略限制，抓不到图床里的外链图，
 // 由本机服务代抓一次（带上源站 referer，绕开常见的防盗链）。只放行 http(s)，只回图片。
+// 代抓目标限定公网：本机服务权限大，不给页面借道探测回环/内网/云元数据地址的机会；响应体设上限防撑爆内存。
+// 三个易被绕过的点都要堵：①IPv6 URL 的 hostname 自带方括号（[::1]），丢给 DNS 查会被泛解析域名放行，
+// 所以 IP 字面量剥括号后直接按网段判、绝不走 DNS；②长写法（0:0:0:0:0:0:0:1）正则会漏，按网段用 BlockList 算，
+// 正则只兜底映射写法；③重定向逐跳校验——follow 模式下中间跳的内网请求已经真实发出去了。
+const PRIVATE_HOST_RE = /^(127\.|10\.|0\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[789]\d|1[01]\d|12[0-7])\.)|^(::1$|::ffff:|f[cd]|fe80:)/i;
+const PRIVATE_NETS = (() => {
+  const bl = new (require('net').BlockList)();
+  [['127.0.0.0', 8], ['10.0.0.0', 8], ['0.0.0.0', 8], ['192.168.0.0', 16], ['169.254.0.0', 16], ['172.16.0.0', 12], ['100.64.0.0', 10]]
+    .forEach(([a, p]) => bl.addSubnet(a, p, 'ipv4'));
+  // 注意别加 ::ffff:0:0/96：BlockList 会把普通 IPv4 也算进这条 v6 规则，公网图会被全拦。映射地址在下面单独拆。
+  [['::1', 128], ['fc00::', 7], ['fe80::', 10]]
+    .forEach(([a, p]) => bl.addSubnet(a, p, 'ipv6'));
+  return bl;
+})();
+// ::ffff:127.0.0.1 和 ::ffff:7f00:1 是同一个回环的两种写法，取出内嵌的 v4 再判
+function unmapV4(ip) {
+  const m = /^::ffff:(.+)$/i.exec(ip);
+  if (!m) return null;
+  if (require('net').isIPv4(m[1])) return m[1];
+  const hex = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(m[1]);
+  if (!hex) return null;
+  const n = (parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16);
+  return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.');
+}
+function isPrivateIp(ip) {
+  const fam = require('net').isIP(ip);
+  if (!fam) return false;
+  if (fam === 6) {
+    const v4 = unmapV4(ip);
+    if (v4) return isPrivateIp(v4);
+    return PRIVATE_NETS.check(ip, 'ipv6') || PRIVATE_HOST_RE.test(ip);
+  }
+  return PRIVATE_NETS.check(ip, 'ipv4') || PRIVATE_HOST_RE.test(ip);
+}
+async function assertPublicHost(hostname) {
+  const bare = String(hostname || '').replace(/^\[|\]$/g, ''); // IPv6 hostname 形如 [::1]
+  if (require('net').isIP(bare)) {
+    if (isPrivateIp(bare)) throw new Error('只代抓公网图片地址');
+    return;
+  }
+  const addrs = await require('dns').promises.lookup(bare, { all: true, verbatim: true });
+  if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) throw new Error('只代抓公网图片地址');
+}
+const PROXY_IMG_MAX_BYTES = 20 * 1024 * 1024;
+const PROXY_IMG_MAX_HOPS = 5;
 async function proxyImage(res, url) {
   try {
     if (!/^https?:\/\//i.test(url || '')) return sendJSON(res, 400, { error: '只支持 http(s) 图片' });
-    const r = await fetch(url, {
-      redirect: 'follow',
-      headers: { 'user-agent': 'Mozilla/5.0', referer: new URL(url).origin + '/' },
-      signal: AbortSignal.timeout(20000),
-    });
+    let target = url; let r = null;
+    for (let hop = 0; hop <= PROXY_IMG_MAX_HOPS; hop++) {
+      await assertPublicHost(new URL(target).hostname); // 每一跳发请求前都校验，重定向进内网直接断
+      r = await fetch(target, {
+        redirect: 'manual',
+        headers: { 'user-agent': 'Mozilla/5.0', referer: new URL(target).origin + '/' },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (![301, 302, 303, 307, 308].includes(r.status)) break;
+      const loc = r.headers.get('location');
+      if (!loc) break;
+      try { await r.body?.cancel(); } catch { /* 重定向响应体直接丢弃 */ }
+      target = new URL(loc, target).href;
+      if (!/^https?:$/i.test(new URL(target).protocol)) return sendJSON(res, 502, { error: '重定向到了非 http(s) 地址' });
+      r = null; // 循环耗尽仍是重定向时以此为凭
+    }
+    if (!r) return sendJSON(res, 502, { error: '重定向次数过多' });
     const type = r.headers.get('content-type') || '';
     if (!r.ok || !/^image\//i.test(type)) return sendJSON(res, 502, { error: '抓不到这张图（HTTP ' + r.status + '）' });
-    const buf = Buffer.from(await r.arrayBuffer());
+    if (Number(r.headers.get('content-length') || 0) > PROXY_IMG_MAX_BYTES) return sendJSON(res, 502, { error: '图片超过 20MB，不代抓' });
+    const chunks = []; let total = 0;
+    for await (const chunk of r.body) {
+      total += chunk.length;
+      if (total > PROXY_IMG_MAX_BYTES) return sendJSON(res, 502, { error: '图片超过 20MB，不代抓' });
+      chunks.push(chunk);
+    }
+    const buf = Buffer.concat(chunks);
     res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
     res.end(buf);
   } catch (e) {

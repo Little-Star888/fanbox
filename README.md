@@ -157,8 +157,8 @@ The UI was designed with [huashu-design](https://github.com/alchaincyf/huashu-de
 
 Download the latest `.dmg` from [**Releases**](https://github.com/alchaincyf/fanbox/releases/latest) and drag it into Applications. Native Apple Silicon (arm64).
 
-> 已用 Apple Development 证书签名 + hardened runtime。首次打开若提示「未验证的开发者」：**右键 → 打开 → 确认**即可。  
-> Signed with an Apple Development certificate + hardened runtime. If macOS warns about an unverified developer on first launch: **right-click → Open → confirm**.
+> 已用 Developer ID 证书签名 + hardened runtime，并通过 Apple 公证（notarization），**双击直接打开**，不用右键。  
+> Signed with a Developer ID certificate + hardened runtime and notarized by Apple — **just double-click to open**, no right-click workaround needed.
 >
 > 应用内置**更新提醒**：检测到 GitHub 上有新 Release 时，右下角会弹一条提示引导下载，不强更、可对单个版本「不再提醒」。  
 > Built-in **update notifications**: when a new release lands on GitHub, a capsule appears at the bottom right. Never forced; individual versions can be muted.

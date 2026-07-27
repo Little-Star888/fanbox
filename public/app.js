@@ -1477,9 +1477,42 @@ async function mdEditor(e, data, mode = 'rich') {
         finally { btn.disabled = false; }
       };
       $('#ts-wechat').onclick = (ev) => copy(ev.currentTarget, (onStep) => typeset.copyWechat(content0, e.path, typeset.current(), onStep));
-      // 其余去向：剪贴板类自己干，平台类递一条指令给终端里的 agent（FanBox 不碰任何平台凭证）
+      // 导出长图：小红书/朋友圈/即刻要的是图不是文。PNG 落在文章旁边、命名跟着文章走，不覆盖旧图
+      const exportLong = async (btn) => {
+        btn.disabled = true;
+        setStatus('生成长图…');
+        try {
+          const r = await typeset.exportImage(content0, e.path, typeset.current(), (i, n) => setStatus(`处理图片 ${i}/${n}…`));
+          const name = r.path.split('/').pop();
+          setStatus('已导出');
+          if (r.failed) toast(`长图已导出（${name}），但 ${r.failed} 张图没取到，图里会缺`, true);
+          else toast(`长图已导出：${name}，就在文章旁边`);
+          if (dirOf(e.path) === state.cwd) refresh(); // 正浏览文章所在目录时文件区跟上，png 立刻可见；在「最近」视图或别的目录时不刷，toast 已说明 png 就在文章旁边
+        } catch (err) { setStatus('导出失败'); toast('导出失败：' + (err.message || err), true); }
+        finally { btn.disabled = false; }
+      };
+      // 分节多图：小红书一条笔记发的是多图不是单张。按 h2 切，编号连续落在文章旁边
+      const exportSlices = async (btn) => {
+        btn.disabled = true;
+        setStatus('切分节…');
+        try {
+          const r = await typeset.exportSlices(content0, e.path, typeset.current(),
+            (i, n, kind) => setStatus(kind === 'slice' ? `生成第 ${i}/${n} 张…` : `处理图片 ${i}/${n}…`));
+          const first = r.paths[0].split('/').pop();
+          setStatus('已导出');
+          // 18 是小红书一条笔记的图片上限，超了得自己挑——只提醒，不替他删
+          if (r.count > 18) toast(`已导出 ${r.count} 张（${first} 起），超过小红书 18 图上限，发之前挑一下`, true);
+          else if (r.failed) toast(`已导出 ${r.count} 张（${first} 起），但 ${r.failed} 张图没取到，图里会缺`, true);
+          else toast(`已导出 ${r.count} 张：${first} 起，就在文章旁边`);
+          if (dirOf(e.path) === state.cwd) refresh(); // 同单张导出：正浏览文章所在目录时文件区才跟上
+        } catch (err) { setStatus('导出失败'); toast('导出失败：' + (err.message || err), true); }
+        finally { btn.disabled = false; }
+      };
+      // 其余去向：剪贴板类/导出类自己干，平台类递一条指令给终端里的 agent（FanBox 不碰任何平台凭证）
       $('#ts-more').onclick = (ev) => (ev.stopPropagation(), popupMenu(ev, [ // 不拦的话这次点击会冒泡到 document，把刚弹出的菜单当场关掉
         { label: '复制到 X', fn: () => copy($('#ts-more'), () => typeset.copyX(content0, e.path)) },
+        { label: '导出长图', fn: () => exportLong($('#ts-more')) },
+        { label: '导出长图（分节）', fn: () => exportSlices($('#ts-more')) },
         { sep: true },
         ...typeset.handoffs().map((d) => ({ label: d.label, fn: () => term.sendPrompt(d.prompt(e.path)) })),
       ]));
@@ -1692,17 +1725,19 @@ async function memoryPanel(dirPath) {
   const d = await api('/api/project-memory?path=' + encodeURIComponent(dirPath));
   const body = ov.querySelector('.mem-body');
   if (!d.ok || !d.sessions.length) {
-    body.innerHTML = '<div class="empty-state">这个文件夹还没有 agent 会话记录<br><br><span class="usage-sub">在这里跑过 Claude Code / Codex 之后，历史会话会出现在这里</span></div>';
+    body.innerHTML = '<div class="empty-state">这个文件夹还没有 agent 会话记录<br><br><span class="usage-sub">在这里跑过 Claude Code / Codex / Kimi / opencode 之后，历史会话会出现在这里</span></div>';
     return;
   }
+  // 徽标/续接命令从注册表的 sessions 配置读，不再按 agent 逐个硬编码；没配置的兜底成首字母徽标
+  const sessCfg = (agent) => (AGENT_REGISTRY.find((a) => a.id === agent) || {}).sessions || {};
   body.innerHTML = d.sessions.map((s, i) => `
     <div class="mem-sess">
       <div class="mem-head" data-i="${i}">
-        <span class="mem-agent${s.agent === 'codex' ? ' codex' : ''}">${s.agent === 'codex' ? '>_' : 'C'}</span>
+        <span class="mem-agent${s.agent === 'claude' ? '' : ' codex'}">${escapeHtml(sessCfg(s.agent).badge || (s.agent || '?')[0].toUpperCase())}</span>
         <span class="mem-title">${escapeHtml(s.title || '（无标题会话）')}</span>
         <button class="ghost-btn mem-resume" data-i="${i}" title="在内嵌终端里接上这段会话的上下文继续">▶ 续上</button>
       </div>
-      <div class="mem-meta">${fmtTime(s.lastT)} · ${s.userMsgs} 条消息${s.files.length ? ` · 改了 ${s.files.length} 个文件` : ''}${s.skills.length ? ' · ' + s.skills.map((k) => `<i class="mem-skill">${escapeHtml(k)}</i>`).join(' ') : ''}</div>
+      <div class="mem-meta">${fmtTime(s.lastT)}${s.userMsgs != null ? ` · ${s.userMsgs} 条消息` : ''}${s.files.length ? ` · 改了 ${s.files.length} 个文件` : ''}${s.skills.length ? ' · ' + s.skills.map((k) => `<i class="mem-skill">${escapeHtml(k)}</i>`).join(' ') : ''}</div>
       ${s.files.length ? `<div class="mem-files hidden">${s.files.map((f) => `<div class="mem-file" data-p="${escapeHtml(f)}" title="${escapeHtml(f)}">${escapeHtml(f.startsWith(dirPath + '/') ? f.slice(dirPath.length + 1) : f.replace(state.home, '~'))}</div>`).join('')}</div>` : ''}
     </div>`).join('');
   body.querySelectorAll('.mem-head').forEach((h) => {
@@ -1715,7 +1750,8 @@ async function memoryPanel(dirPath) {
   body.querySelectorAll('.mem-resume').forEach((b) => {
     b.onclick = () => {
       const s = d.sessions[Number(b.dataset.i)];
-      const cmd = s.agent === 'codex' ? `codex resume ${s.id}` : `claude --dangerously-skip-permissions --resume ${s.id}`;
+      const tpl = sessCfg(s.agent).resumeCmd || 'claude --dangerously-skip-permissions --resume {id}';
+      const cmd = tpl.replace('{id}', s.id);
       close();
       term.runInDir(dirPath, cmd, '已在终端续上会话');
     };
@@ -2508,14 +2544,16 @@ const wechatView = {
 //      ② 设置面板（⚙ 滑杆按钮）勾选启用哪些，存 config.json 的 enabledAgents，默认 claude + codex
 //      ③ config.json 的 agents 数组做高级自定义：同 id 覆盖内置命令，新 id 追加按钮
 // app: true 的是桌面应用（无终端 CLI 形态，官方确认），按钮改为 open -a 拉起，检测走 open -Ra
+// sessions: 有会话适配器的 agent 声明续接方式——badge 是项目记忆面板的徽标，resumeCmd 里 {id} 占位符替换成会话 id；
+//           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
 const AGENT_REGISTRY = [
-  { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code' },
-  { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex' },
+  { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions --resume {id}' } },
+  { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume {id}' } },
   { id: 'hermes', label: 'Hermes Agent', cmd: 'hermes', bin: 'hermes', install: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' },
   { id: 'openclaw', label: 'OpenClaw', cmd: 'openclaw', bin: 'openclaw', install: 'npm install -g openclaw' },
-  { id: 'kimi', label: 'Kimi Code', cmd: 'kimi', bin: 'kimi', install: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash' },
+  { id: 'kimi', label: 'Kimi Code', cmd: 'kimi', bin: 'kimi', install: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash', sessions: { badge: 'K', resumeCmd: 'kimi -S {id}' } },
   { id: 'zcode', label: 'ZCode', cmd: 'open -a ZCode', app: 'ZCode', install: 'https://zcode.z.ai （桌面应用，官网下载 dmg）' },
-  { id: 'opencode', label: 'opencode', cmd: 'opencode', bin: 'opencode', install: 'curl -fsSL https://opencode.ai/install | bash' },
+  { id: 'opencode', label: 'opencode', cmd: 'opencode', bin: 'opencode', install: 'curl -fsSL https://opencode.ai/install | bash', sessions: { badge: 'oc', resumeCmd: 'opencode -s {id}' } },
   { id: 'pi', label: 'pi', cmd: 'pi', bin: 'pi', install: 'curl -fsSL https://pi.dev/install.sh | sh' },
   { id: 'codebuddy', label: 'CodeBuddy', cmd: 'codebuddy', bin: 'codebuddy', install: 'npm install -g @tencent-ai/codebuddy-code' },
   { id: 'workbuddy', label: 'WorkBuddy', cmd: 'open -a WorkBuddy', app: 'WorkBuddy', install: 'https://codebuddy.cn/work （桌面应用，官网下载）' },
@@ -5442,7 +5480,11 @@ function bindUpdateNotice() {
         dl.disabled = true; dl.textContent = '下载中…';
         const r = await window.fanboxUpdate.download(version).catch(() => ({ ok: false }));
         if (r && r.ok) { bar.querySelector('.up-msg').textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
-        else { dl.disabled = false; dl.textContent = '下载更新'; toast('下载失败，去发布页手动下吧', true); }
+        else {
+          dl.disabled = false; dl.textContent = '下载更新';
+          // no-asset：这个 Release 没发当前架构的 dmg，主进程已经把发布页开出来了
+          toast(r && r.error === 'no-asset' ? `这个版本没有 ${r.arch} 安装包，已打开发布页` : '下载失败，去发布页手动下吧', true);
+        }
       };
       if (window.fanboxUpdate.onProgress) window.fanboxUpdate.onProgress((m) => {
         if (m.state === 'downloading' && dl.disabled) dl.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
