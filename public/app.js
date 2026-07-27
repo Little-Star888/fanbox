@@ -5480,7 +5480,11 @@ function bindUpdateNotice() {
         dl.disabled = true; dl.textContent = '下载中…';
         const r = await window.fanboxUpdate.download(version).catch(() => ({ ok: false }));
         if (r && r.ok) { bar.querySelector('.up-msg').textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
-        else { dl.disabled = false; dl.textContent = '下载更新'; toast('下载失败，去发布页手动下吧', true); }
+        else {
+          dl.disabled = false; dl.textContent = '下载更新';
+          // no-asset：这个 Release 没发当前架构的 dmg，主进程已经把发布页开出来了
+          toast(r && r.error === 'no-asset' ? `这个版本没有 ${r.arch} 安装包，已打开发布页` : '下载失败，去发布页手动下吧', true);
+        }
       };
       if (window.fanboxUpdate.onProgress) window.fanboxUpdate.onProgress((m) => {
         if (m.state === 'downloading' && dl.disabled) dl.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
