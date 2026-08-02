@@ -3301,6 +3301,9 @@ const term = {
     player.refreshHint(); // 有录像就给回放按钮点红点，提升发现性
     localStorage.setItem('fb_term_open', '1');
     if (!localStorage.getItem('fb_term_draghint')) { localStorage.setItem('fb_term_draghint', '1'); setTimeout(() => toast('提示：把左侧文件 / 文件夹拖进终端，即插入路径喂给 agent'), 700); }
+    // 终端里点击不移光标是终端协议使然（光标归 CLI 程序管，双击只是选词）。xterm 内置
+    // altClickMovesCursor（默认开）：Option+点击会合成方向键把光标移过去——补一条一次性提示让人发现（#59）
+    else if (!localStorage.getItem('fb_term_optionhint')) { localStorage.setItem('fb_term_optionhint', '1'); setTimeout(() => toast('提示：按住 Option 点击输入行文字，光标会移到点击处（终端里普通点击/双击是选字，同 iTerm）'), 700); }
   },
   close() {
     if (this.maximized) this.toggleMax(false); // 铺满状态下收起终端，term-max 不清会把文件区一起藏没
