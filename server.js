@@ -1509,7 +1509,9 @@ async function proxyImage(res, url) {
   }
 }
 
-async function serveThumb(req, res, p, size) {
+// ver：调用方带的内容版本号（文件 mtime）。带了 = 这个 URL 的内容永不再变，发长缓存；
+// 没带 = 发协商缓存，靠 ETag 走 304，改过的图立刻能看见新的（md 里引用的图拿不到 mtime，走这条）
+async function serveThumb(req, res, p, size, ver) {
   let src;
   try { src = resolvePath(p); } catch { res.writeHead(400); res.end('bad path'); return; }
   let st;
@@ -1521,8 +1523,16 @@ async function serveThumb(req, res, p, size) {
   const jpegOut = isImg && !ALPHA_IMG_EXT.has(e);
   const cacheFile = path.join(THUMB_DIR, key + (jpegOut ? '.jpg' : '.png'));
   const type = jpegOut ? 'image/jpeg' : 'image/png';
+  // key 已经把「源文件路径 + mtime + 目标宽度」全揉进去了，拿它当 ETag 天然精确
+  const etag = '"' + key + '"';
+  const cacheCtl = ver ? 'max-age=604800' : 'no-cache';
+  if (req.headers['if-none-match'] === etag) { // 内容没变，不回体（本机 304 约 1ms）
+    res.writeHead(304, { ETag: etag, 'Cache-Control': cacheCtl });
+    res.end();
+    return;
+  }
   const sendCache = () => {
-    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': 'max-age=604800' });
+    res.writeHead(200, { 'Content-Type': type, 'Cache-Control': cacheCtl, ETag: etag });
     const rs = fs.createReadStream(cacheFile);
     rs.on('error', () => { try { res.destroy(); } catch { /* */ } }); // 读缓存中途出错别让未捕获 error 打挂进程
     rs.pipe(res);
@@ -2547,7 +2557,7 @@ const server = http.createServer(async (req, res) => {
       return serveRaw(req, res, fsPath);
     }
     if (p === '/api/thumb') {
-      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10));
+      return serveThumb(req, res, qp.get('path'), parseInt(qp.get('w') || '240', 10), qp.get('v'));
     }
     if (p === '/api/img-proxy') {
       return proxyImage(res, qp.get('url'));
