@@ -1389,8 +1389,23 @@ async function serveStatic(req, res, urlPath) {
 const THUMB_IMG_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'tiff', 'tif', 'heic', 'heif', 'avif']);
 const ALPHA_IMG_EXT = new Set(['png', 'gif', 'webp', 'avif']); // 可能带透明通道：缩略图必须出 png，jpeg 会把透明拍成白底
 const thumbInflight = new Map(); // cacheFile -> Promise，去重并发生成
+// 外部转码器并发闸：从前每个缩略图 miss 都直接 fork 一个 sips，打开上百项的目录
+// = 上百个进程同时起，CPU 被打满、别的活全排队。闸设在 run() 上，
+// sips / qlmanage / HEIC 转码走的是同一条队。
+let runActive = 0;
+const runQueue = [];
+const RUN_MAX = 4;
 function run(cmd, args) {
-  return new Promise((resolve, reject) => execFile(cmd, args, { timeout: 15000 }, (e) => (e ? reject(e) : resolve())));
+  return new Promise((resolve, reject) => {
+    const job = () => execFile(cmd, args, { timeout: 15000 }, (e) => {
+      runActive--;
+      const next = runQueue.shift();
+      if (next) { runActive++; next(); }
+      e ? reject(e) : resolve();
+    });
+    if (runActive < RUN_MAX) { runActive++; job(); }
+    else runQueue.push(job);
+  });
 }
 // 图片走 sips 缩放（快）；视频/PDF/其它走 qlmanage QuickLook 抽帧
 async function generateThumb(src, e, size, cacheFile, isImg) {
@@ -2746,7 +2761,9 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { favorites: cfg.favorites || [], recentOpened: cfg.recentOpened || [] });
     }
 
-    // ---------- Agent 控制接口：桌面 app 专属（能力由 electron/main.js 注入 global.__fanboxAgent）----------
+    // ---------- Agent 控制接口：桌面 app 专属 ----------
+    // global.__fanboxAgent 由 electron/server-child.js 注入，是 RPC 代理（真实现在主进程，
+    // pty 都活在那边），所以每个方法都可能回 Promise——一律 await，裸对象 await 是 no-op。
     // token 只注入翻箱自开终端的环境变量、不落盘：只有跑在翻箱终端里的 agent 拿得到门票。见 docs/12。
     if (p.startsWith('/api/agent/')) {
       const A = global.__fanboxAgent;
@@ -2761,11 +2778,11 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, await cronAction(p.slice('/api/agent/cron/'.length), b));
       }
       if (p === '/api/agent/terminals') return sendJSON(res, 200, await A.list());
-      if (p === '/api/agent/read') return sendJSON(res, 200, A.read(qp.get('id'), parseInt(qp.get('lines') || '0', 10)));
-      if (p === '/api/agent/send' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, A.send(b.id, b.text, b)); }
+      if (p === '/api/agent/read') return sendJSON(res, 200, await A.read(qp.get('id'), parseInt(qp.get('lines') || '0', 10)));
+      if (p === '/api/agent/send' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.send(b.id, b.text, b)); }
       if (p === '/api/agent/create' && req.method === 'POST') { return sendJSON(res, 200, await A.create(await readBody(req))); }
       if (p === '/api/agent/wait' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.wait(b.id, b)); }
-      if (p === '/api/agent/kill' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, A.kill(b.id)); }
+      if (p === '/api/agent/kill' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.kill(b.id)); }
       return sendJSON(res, 404, { ok: false, error: 'unknown agent endpoint' });
     }
 
