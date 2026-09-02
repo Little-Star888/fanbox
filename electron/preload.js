@@ -75,6 +75,8 @@ contextBridge.exposeInMainWorld('fanboxAgentCtl', {
   onCreate: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:term-create', h); return () => ipcRenderer.removeListener('agent:term-create', h); },
   created: (m) => ipcRenderer.send('agent:term-created', m),
   onTouch: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:touch', h); return () => ipcRenderer.removeListener('agent:touch', h); },
+  // agent 官方 hook 事件 { id, state, event, file?, agent }：hooked 终端的忙/等确认/收工由它驱动，不再刮屏
+  onEvent: (cb) => { const h = (e, m) => cb(m); ipcRenderer.on('agent:event', h); return () => ipcRenderer.removeListener('agent:event', h); },
 });
 
 contextBridge.exposeInMainWorld('fanboxEnv', {

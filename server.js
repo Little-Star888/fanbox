@@ -587,10 +587,16 @@ ${history || '（还没有历史记录）'}
   const kickoff = `先完整读 ${ORGANIZE_BRIEF_FILE}，然后按里面的约定，和我对话式整理当前文件夹`;
   // claude 跳权限确认（动手前方案已过人）；codex 旗标按当前版本实测拼出
   const cmd = engine === 'codex'
-    ? `codex${await codexOrganizeFlags(bin)} "${kickoff}"`
-    : `claude --dangerously-skip-permissions "${kickoff}"`;
+    ? `codex${await codexOrganizeFlags(bin)}${codexHooksFlag()} "${kickoff}"`
+    : `claude --dangerously-skip-permissions${claudeHooksFlag()} "${kickoff}"`;
   return { ok: true, engine, cmd };
 }
+
+// FanBox 自己拉起的 claude / codex 一律带上官方 hooks，agent 自己汇报状态（见 docs/12「事件端点」）。
+// 两份文件由桌面主进程启动时写到 ~/.fanbox/hooks/；网页版没有它们就裸跑（claude 遇到不存在的 --settings 会报错退出）
+const HOOKS_DIR = path.join(HOME, '.fanbox', 'hooks');
+function claudeHooksFlag() { const f = path.join(HOOKS_DIR, 'claude-settings.json'); return fs.existsSync(f) ? ` --settings "${f}"` : ''; }
+function codexHooksFlag() { const f = path.join(HOOKS_DIR, 'codex-notify.sh'); return fs.existsSync(f) ? ` -c 'notify=["${f}"]'` : ''; }
 
 // ---------- 发版向导：检查项目状态 → 改版本号/CHANGELOG → 命令序列交给内嵌终端跑（每步可见可拦）----------
 async function releaseInspect(p) {
@@ -2552,8 +2558,8 @@ function cronShq(s) { return `'${String(s).replace(/'/g, `'\\''`)}'`; }
 function cronCommand(t) {
   if (t.agent === 'shell') return String(t.prompt || '');
   const p = cronShq(t.prompt || '');
-  if (t.agent === 'codex') return t.full ? `codex --full-auto ${p}` : `codex ${p}`;
-  return t.full ? `claude --dangerously-skip-permissions ${p}` : `claude --permission-mode acceptEdits ${p}`;
+  if (t.agent === 'codex') return `codex${t.full ? ' --full-auto' : ''}${codexHooksFlag()} ${p}`;
+  return `claude ${t.full ? '--dangerously-skip-permissions' : '--permission-mode acceptEdits'}${claudeHooksFlag()} ${p}`;
 }
 async function cronFire(t, manual) {
   t.nextRun = (t.schedule || {}).type === 'at' ? null : cronNextRun(t); // 先排下一次，防调度重入
@@ -2927,6 +2933,8 @@ const server = http.createServer(async (req, res) => {
       if (p === '/api/agent/create' && req.method === 'POST') { return sendJSON(res, 200, await A.create(await readBody(req))); }
       if (p === '/api/agent/wait' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.wait(b.id, b)); }
       if (p === '/api/agent/kill' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.kill(b.id)); }
+      // agent 官方 hook 事件：body 是 claude hook / codex notify 的 JSON 原样，终端 id 走 x-fanbox-term 头（hook 命令里 $FANBOX_TERM_ID 展开）
+      if (p === '/api/agent/event' && req.method === 'POST') { const b = await readBody(req); return sendJSON(res, 200, await A.event(String(req.headers['x-fanbox-term'] || ''), b)); }
       return sendJSON(res, 404, { ok: false, error: 'unknown agent endpoint' });
     }
 

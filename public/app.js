@@ -2732,9 +2732,14 @@ const wechatView = {
 // app: true 的是桌面应用（无终端 CLI 形态，官方确认），按钮改为 open -a 拉起，检测走 open -Ra
 // sessions: 有会话适配器的 agent 声明续接方式——badge 是项目记忆面板的徽标，resumeCmd 里 {id} 占位符替换成会话 id；
 //           没有 sessions 字段 = 该 agent 暂不支持会话回溯（服务端也没有对应适配器）
+// 桌面版拉起的 claude / codex 带上官方 hooks（主进程启动时写到 ~/.fanbox/hooks/），agent 自己汇报忙/等确认/收工，
+// 不再靠刮终端文本。$HOME 交给 shell 展开；网页版没有这份文件（claude 遇到不存在的 --settings 会报错），保持裸命令。
+// config.json 里用户自定义的 agents 命令原样生效，不带 hooks 就退回旧的刮屏判定
+const CLAUDE_HOOKS = window.fanboxEnv ? ' --settings "$HOME/.fanbox/hooks/claude-settings.json"' : '';
+const CODEX_HOOKS = window.fanboxEnv ? ' -c "notify=[\\"$HOME/.fanbox/hooks/codex-notify.sh\\"]"' : '';
 const AGENT_REGISTRY = [
-  { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions', bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions --resume {id}' } },
-  { id: 'codex', label: 'Codex', cmd: 'codex', bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex resume {id}' } },
+  { id: 'claude', label: 'Claude Code', cmd: 'claude --dangerously-skip-permissions' + CLAUDE_HOOKS, bin: 'claude', install: 'npm install -g @anthropic-ai/claude-code', sessions: { badge: 'C', resumeCmd: 'claude --dangerously-skip-permissions' + CLAUDE_HOOKS + ' --resume {id}' } },
+  { id: 'codex', label: 'Codex', cmd: 'codex' + CODEX_HOOKS, bin: 'codex', install: 'npm install -g @openai/codex', sessions: { badge: '>_', resumeCmd: 'codex' + CODEX_HOOKS + ' resume {id}' } },
   { id: 'hermes', label: 'Hermes Agent', cmd: 'hermes', bin: 'hermes', install: 'curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash' },
   { id: 'openclaw', label: 'OpenClaw', cmd: 'openclaw', bin: 'openclaw', install: 'npm install -g openclaw' },
   { id: 'kimi', label: 'Kimi Code', cmd: 'kimi', bin: 'kimi', install: 'curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash', sessions: { badge: 'K', resumeCmd: 'kimi -S {id}' } },
@@ -4128,6 +4133,9 @@ const term = {
   // 非活动标签产生输出标记未读小点；长任务（busy>4s）完成且窗口失焦/非当前标签时发系统通知。
   markBusy(s) {
     const now = Date.now();
+    // hooked 会话（收到过 agent 官方 hook 事件）：忙闲由 onAgentEvent 定，输出只管非活动标签的未读点——
+    // 收工后 TUI 的重绘/光标闪烁不能再把它拉回 busy
+    if (s.hooked) { if (s.id !== this.active && !s.unread && now - (s.lastInput || 0) >= 400) { s.unread = true; this.renderTabs(); } return; }
     $('#terminal-panel').classList.remove('term-awaiting'); // 又有动静了，撤掉「轮到你」呼吸
     // 回显过滤：距上次用户输入 <400ms 的输出多半是回显/TUI 重绘，不算 agent 自主干活：
     // 不进入 busy、不推 busyStart；已在 busy 则只续命（agent 干活时排队打字不打断）。
@@ -4160,6 +4168,45 @@ const term = {
     clearTimeout(this._awaitT);
     this._awaitT = setTimeout(() => p.classList.remove('term-awaiting'), 6500);
   },
+  // 官方 hook 事件（main 的 agent:event，见 docs/12「事件端点」）：hooked 会话的忙 / 等确认 / 收工全由 agent 自己说了算，
+  // 不再跑 25 行正则和 2.5s 静默判定；视觉与提示音走和旧路径同一套。未 hooked 的会话（用户手敲 claude、裸 shell）完全不变
+  onAgentEvent({ id, state, event, file, agent }) {
+    const s = this.sessions.find((x) => x.id === id);
+    if (!s) return;
+    if (file) attributeChange(file, id, agent);
+    if (state === 'ended') { // 会话结束回到裸 shell：交还给旧判据
+      s.hooked = false;
+      if (s.status === 'busy') { s.status = 'idle'; this.renderTabs(); }
+      return;
+    }
+    s.hooked = true; s.agent = agent;
+    const now = Date.now();
+    if (state === 'working') {
+      $('#terminal-panel').classList.remove('term-awaiting');
+      if (s.status !== 'busy') { s.status = 'busy'; s.busyStart = now; this.renderTabs(); }
+      if (event === 'UserPromptSubmit' || event === 'SessionStart') this.roundSnapshot(s); // 回合开工才存档，工具调用不刷
+      this.ensureStatusTick(); // 只为图集保养
+      return;
+    }
+    // needs_permission / needs_input / done：把球踢回给你。idle_prompt 在 Stop 之后 60s 才来，已空闲就别二次报喜
+    if (s.status !== 'busy' && state !== 'needs_permission') return;
+    const dur = now - (s.busyStart || now);
+    s.status = 'idle';
+    this.renderTabs();
+    this.refreshCwd(s);
+    if (state === 'needs_permission') {
+      this.awaitGlow();
+      playChime('ask');
+      if (!document.hasFocus() || s.id !== this.active) this.notify(s, '等待你确认 · ' + (s.title || 'shell'), this.lastReplyExcerpt(s) || (s.title || 'shell') + ' 在等你拍板');
+      return;
+    }
+    if (dur > 1500) this.awaitGlow();
+    if (dur > 4000) {
+      rippleFileArea();
+      playChime('done');
+      if (!document.hasFocus() || s.id !== this.active) this.notify(s, 'agent 任务完成 · ' + (s.title || 'shell'), this.lastReplyExcerpt(s) || (s.title || 'shell') + ' 已空闲');
+    }
+  },
   ensureStatusTick() {
     if (this._statusTimer) return;
     this._statusTimer = setInterval(() => {
@@ -4167,6 +4214,7 @@ const term = {
       this.sessions.forEach((s) => {
         if (s.status !== 'busy') return;
         this.atlasCare(now); // 忙满 5 分钟清一次图集，长中文输出中途也能自愈
+        if (s.hooked) { anyBusy = true; return; } // hooked：收工由 agent 事件宣布，下面的静默/正则启发式不跑
         const quiet = now - (s.lastData || 0);
         if (quiet <= 2500) { anyBusy = true; return; } // claude/codex 忙碌心跳约 1s 一帧，容差太紧会闪断误报
         const tail = this.tailText(s);
@@ -4647,12 +4695,25 @@ function recordChange(dir, filename) {
   state.changeTimeline.push({ path: full, name, ts: now }); // 每次写入都记一笔，供会话回放
   if (state.changeTimeline.length > 3000) state.changeTimeline.shift();
   const existing = state.changeLog.find((c) => c.path === full);
-  if (existing) { existing.ts = now; existing.count++; }
+  // hook 刚报过的同一文件，监听器紧跟着再报一次是同一笔改动：只刷时间不加次数
+  if (existing) { existing.ts = now; if (now - (existing.hookTs || 0) > 3000) existing.count++; }
   else state.changeLog.unshift({ path: full, name, dir, ts: now, count: 1 });
   // 最新置顶；已存在的移到队首
   state.changeLog.sort((a, b) => b.ts - a.ts);
   if (state.changeLog.length > 100) state.changeLog.length = 100;
   renderChangesBadge();
+}
+// agent 官方 hook 报来的文件改动（PostToolUse Edit/Write）：进同一个收件箱并归属到终端/agent。
+// 监听范围外（别的目录）的改动只有这条路进得来；监听范围内的多半随后还会被监听器报一次，靠 hookTs 去重
+function attributeChange(full, termId, agent) {
+  const cwd = state.cwd && full.startsWith(state.cwd.replace(/\/$/, '') + '/') ? state.cwd.replace(/\/$/, '') : '';
+  const dir = cwd || full.slice(0, full.lastIndexOf('/'));
+  const rel = full.slice(dir.length + 1);
+  if (!dir || !rel) return;
+  const now = Date.now();
+  let c = state.changeLog.find((x) => x.path === full);
+  if (!c || now - c.ts > 3000) { recordChange(dir, rel); c = state.changeLog.find((x) => x.path === full); }
+  if (c) { c.hookTs = now; c.termId = termId; c.agent = agent; }
 }
 function renderChangesBadge() {
   const b = $('#changes-badge'); if (!b) return;
@@ -5165,7 +5226,7 @@ if (window.fanboxPty) {
   window.fanboxPty.onExit(({ id }) => {
     const s = term.sessions.find((x) => x.id === id);
     if (s) {
-      s.dead = true; s.status = 'dead';
+      s.dead = true; s.status = 'dead'; s.hooked = false;
       s.xterm.write('\r\n\x1b[90m[进程已退出 — 回车重开，或 ✕ 关闭]\x1b[0m\r\n');
       term.renderTabs();
       term.notify(s, '终端已退出', (s.title || 'shell') + ' 的进程结束了');
@@ -5728,6 +5789,7 @@ if (window.fanboxAgentCtl) {
     term.renderTabs();
     setTimeout(() => term.renderTabs(), 8200); // 标记过期后重画抹掉
   });
+  if (window.fanboxAgentCtl.onEvent) window.fanboxAgentCtl.onEvent((m) => term.onAgentEvent(m));
 }
 
 init();
