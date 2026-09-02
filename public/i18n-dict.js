@@ -382,6 +382,14 @@ window.FANBOX_DICT = {
   '等待你确认': 'Waiting for your approval',
   'agent 任务完成': 'Agent task done',
   '终端已退出': 'Terminal exited',
+  // 指挥台（终端 ≥ 2 时标签栏下方的会话列表）+ ⌘⌥L
+  '干活中': 'Working',
+  '等你确认': 'Needs your approval',
+  '等你输入': 'Needs your input',
+  '已退出': 'Exited',
+  '刚完成': 'Just finished',
+  '点击切到该标签': 'Click to switch to this tab',
+  '没有在等你的': 'Nothing is waiting on you',
   '[进程已退出 — 回车重开，或 ✕ 关闭]': '[Process exited — Enter to restart, or ✕ to close]',
 
   // ---------- 用量面板 ----------
@@ -488,6 +496,9 @@ window.FANBOX_DICT_RULES = [
   [/^已显示 (\d+) \/ (\d+) 项$/, (m) => `Showing ${m[1]} / ${m[2]}`],
   // 时长（fmtDur：录像列表 + 会话回放，「1小时30分」「1分33秒」「20秒」）
   [/^(?=\d)(?:(\d+)小时)?(?:(\d+)分)?(?:(\d+)秒)?$/, (m) => [m[1] && `${m[1]}h`, m[2] && `${m[2]}m`, m[3] && `${m[3]}s`].filter(Boolean).join(' ')],
+  // 指挥台：改动文件数
+  [/^(\d+) 文件$/, (m) => `${m[1]} files`],
+  [/^本回合改动 (\d+) 个文件$/, (m) => `${m[1]} files changed this round`],
   [/^(\d+) 秒$/, (m) => `${m[1]} s`],
   [/^(\d+) 分钟$/, (m) => `${m[1]} min`],
   [/^([\d.]+) 小时$/, (m) => `${m[1]} hr`],
