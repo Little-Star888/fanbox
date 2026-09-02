@@ -1906,18 +1906,46 @@ async function snapshotPanel(dirPath) {
   const close = () => { ov.remove(); document.removeEventListener('keydown', onKey, true); };
   ov.onclick = (ev) => { if (ev.target === ov) close(); };
   document.addEventListener('keydown', onKey, true);
-  const d = await api('/api/snapshots?path=' + encodeURIComponent(dirPath));
+  const [d, u] = await Promise.all([api('/api/snapshots?path=' + encodeURIComponent(dirPath)), api('/api/snapshots/usage').catch(() => null)]);
   const body = ov.querySelector('.snap-body');
+  const projName = d.project ? baseOf(d.project) : '';
+  // agent 正在这个项目里干活时不给回滚/清理：一边写一边动它的仓库只会两败俱伤
+  const busyHere = () => {
+    let busy = false;
+    term.sessions.forEach((t) => {
+      const c = t.cwd || t.startDir || '';
+      if (!t.dead && t.status === 'busy' && (c === d.project || c.startsWith(d.project + '/') || d.project.startsWith(c + '/'))) busy = true;
+    });
+    return busy;
+  };
+  // 占用一栏：影子仓库堆在 ~/.fanbox 里从前界面上完全看不见（实测 22GB），这里给个数字和两个清理口
+  const mine = u && u.ok && d.project ? u.repos.find((r) => r.project === d.project) : null;
+  const usageHtml = !u || !u.ok ? '' : `<div class="snap-usage"><span>存档共占用 ${fmtSize(u.total) || '0 B'}${d.project ? ` · 此项目 ${fmtSize(mine ? mine.bytes : 0) || '0 B'}` : ''}</span>` +
+    (mine ? '<button class="ghost-btn snap-restore" data-clean="project">清理此项目存档</button>' : '') +
+    '<button class="ghost-btn snap-restore" data-clean="dead">清理失效仓库</button></div>';
+  const wireClean = () => body.querySelectorAll('[data-clean]').forEach((b) => {
+    b.onclick = async () => {
+      const dead = b.dataset.clean === 'dead';
+      if (!dead && busyHere()) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再清理', true); return; }
+      const msg = dead ? '删除所有没有任何可恢复快照的失效仓库？' : `删除「${projName}」的全部回合存档？删掉后无法再回到之前的任何一轮`;
+      if (!await confirmDialog(msg)) return;
+      b.disabled = true;
+      const r = await apiPost('/api/snapshots/clean', dead ? { dead: true } : { project: d.project });
+      if (!r.ok) { toast(r.error || '清理失败', true); b.disabled = false; return; }
+      toast(r.removed ? `已清理 ${r.removed} 个仓库，释放 ${fmtSize(r.freed) || '0 B'}` : '没有失效仓库');
+      snapshotPanel(dirPath); // 重开一遍，数字和列表都刷新
+    };
+  });
   if (!d.project || !d.snaps.length) {
-    body.innerHTML = '<div class="empty-state">这个文件夹还没有存档<br><br><span class="usage-sub">在内嵌终端里跑 agent 时，每轮开工前会自动存一份，坏了随时能回来</span></div>';
+    body.innerHTML = usageHtml + '<div class="empty-state">这个文件夹还没有存档<br><br><span class="usage-sub">在内嵌终端里跑 agent 时，每轮开工前会自动存一份，坏了随时能回来</span></div>';
+    wireClean();
     return;
   }
   const clock = (ts) => {
     const t = new Date(ts); const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
     return t.toDateString() === new Date().toDateString() ? hm : `${t.getMonth() + 1}/${t.getDate()} ${hm}`;
   };
-  const projName = baseOf(d.project);
-  body.innerHTML = `<div class="snap-hint">每一条都是当时整个项目的完整状态。恢复前会自动把当前状态也存一份，随时能再滚回来。</div>` +
+  body.innerHTML = usageHtml + `<div class="snap-hint">每一条都是当时整个项目的完整状态。恢复前会自动把当前状态也存一份，随时能再滚回来。</div>` +
     d.snaps.map((s, i) => `
     <div class="snap-row">
       <span class="snap-time" title="${new Date(s.ts).toLocaleString()}">${clock(s.ts)}</span>
@@ -1925,16 +1953,11 @@ async function snapshotPanel(dirPath) {
       <span class="snap-ago">${fmtTime(s.ts)}</span>
       <button class="ghost-btn snap-restore" data-i="${i}">回到这时</button>
     </div>`).join('');
-  body.querySelectorAll('.snap-restore').forEach((b) => {
+  wireClean();
+  body.querySelectorAll('.snap-restore[data-i]').forEach((b) => {
     b.onclick = async () => {
       const s = d.snaps[Number(b.dataset.i)];
-      // agent 正在这个项目里干活时不给回滚：一边写一边恢复只会两败俱伤
-      let busy = false;
-      term.sessions.forEach((t) => {
-        const c = t.cwd || t.startDir || '';
-        if (!t.dead && t.status === 'busy' && (c === d.project || c.startsWith(d.project + '/') || d.project.startsWith(c + '/'))) busy = true;
-      });
-      if (busy) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再恢复', true); return; }
+      if (busyHere()) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再恢复', true); return; }
       if (!await confirmDialog(`把「${projName}」整个恢复到 ${clock(s.ts)} 存档时的样子？之后的改动会被移除（当前状态已自动存档，可再滚回来）`)) return;
       b.disabled = true; b.textContent = '恢复中…';
       const r = await apiPost('/api/snapshot-restore', { path: d.project, hash: s.hash });
