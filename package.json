@@ -23,6 +23,21 @@
       "buildResources": "build",
       "output": "dist"
     },
+    "files": [
+      "**/*",
+      "!.claude{,/**/*}",
+      "!dist{,/**/*}",
+      "!_archive{,/**/*}",
+      "!design-demos{,/**/*}",
+      "!experiments{,/**/*}",
+      "!docs{,/**/*}",
+      "!素材{,/**/*}",
+      "!assets{,/**/*}",
+      "!src-vendor{,/**/*}",
+      "!.icon.html",
+      "!.DS_Store",
+      "!**/.DS_Store"
+    ],
     "asar": true,
     "npmRebuild": false,
     "asarUnpack": [
