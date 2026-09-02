@@ -11,6 +11,11 @@
 
 ## [Unreleased]
 
+### Changed
+- **agent 状态改由官方 hooks 汇报，不再刮终端文本**：从前判「agent 在干活 / 轮到你 / 等你确认」全靠输出静默 2.5s + 扫末尾 25 行匹配英文文案，每 600ms 一轮，文案一变就漏响、误报；主进程另一套「前台进程不是裸 shell 就算忙」让 claude 空闲等输入时「合盖继续干活」也不放 Mac 睡。现在 FanBox 启动时把一份 hooks 配置写到 `~/.fanbox/hooks/`，一键启动 / 续会话 / 定时任务 / AI 整理拉起的 Claude Code 带 `--settings` 叠加它（不动用户自己的 `~/.claude/settings.json`），Codex 走 `-c notify=[…]`（用户原有的 notify 程序会被接力调用，不丢）；agent 开工、调工具、弹权限确认、回答完、会话结束都直接告诉 FanBox。标签圆点、「轮到你」呼吸、提示音、系统通知全部改吃这些事件，权限确认框弹出的瞬间就响；电源守卫只在 agent 真的在干活时才拦住休眠。用户自己在 shell 里手敲 `claude` 不带 hooks、或跑普通命令，一切照旧走原来的判定
+- **变更收件箱知道是谁改的**：hooks 报来的 Edit/Write 带文件路径，进收件箱时记下终端与 agent 归属；监听目录之外的改动（agent 改了别的项目）也进得来了
+- `/api/agent/terminals` 每个终端多两个字段：`hooked`（是否收到过官方事件）与 `state`（`working / needs_permission / needs_input / done`），`busy` 对 hooked 终端以 `state` 为准
+
 ## [2.14.0] - 2026-08-27
 
 这版不加新功能，专修两类「越用越卡」：拖文件进终端要等十几秒、多图 md 文档把编辑器拖死。

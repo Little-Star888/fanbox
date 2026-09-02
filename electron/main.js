@@ -35,6 +35,46 @@ const AGENT_TOKEN = process.env.FANBOX_AGENT_TOKEN || crypto.randomBytes(24).toS
 const termBufs = new Map();    // id -> 去 ANSI 滚动缓冲（~200KB），/api/agent/read 的数据源
 const termLastOut = new Map(); // id -> 最近输出时间戳，wait 的 idle 判定
 const termWaiters = new Map(); // id -> Set<fn(text)>，wait 的增量输出订阅
+// id -> { agent, sessionId, state, since, lastEventAt, hooked:true, changed: Map(path -> {n, lastAt, tool}) }
+// agent 官方 hooks 报来的事实（见 writeHookFiles / agentEvent）。有这条记录的终端，忙闲不再刮终端文本
+const termFacts = new Map();
+
+// ---------- Agent 官方 hooks：让 claude/codex 自己汇报「在干活 / 等确认 / 干完了」，取代刮终端文本 ----------
+// 启动时把两份静态文件写到 ~/.fanbox/hooks/：claude 走 `--settings 文件` 叠加（不动用户自己的
+// ~/.claude/settings.json），codex 走 `-c notify=[脚本]`。命令里的 $FANBOX_* 由 pty 环境展开，
+// 所以文件内容对所有终端相同。--noproxy：用户开着系统代理时 curl 127.0.0.1 会被拦掉（实测）。
+const HOOKS_DIR = () => path.join(os.homedir(), '.fanbox', 'hooks');
+const HOOK_CURL = `curl -s --noproxy '*' -m 3 -X POST "$FANBOX_CTL/event" -H "x-fanbox-token: $FANBOX_CTL_TOKEN" -H "x-fanbox-term: $FANBOX_TERM_ID" -H 'content-type: application/json' --data-binary`;
+function writeHookFiles() {
+  try {
+    const dir = HOOKS_DIR();
+    fs.mkdirSync(dir, { recursive: true });
+    // async：hook 在后台跑、不等返回，绝不拖慢 agent；timeout 5s 兜底
+    const on = (matcher) => [{ matcher, hooks: [{ type: 'command', command: `${HOOK_CURL} @- >/dev/null 2>&1 || true`, async: true, timeout: 5 }] }];
+    const hooks = {};
+    for (const ev of ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Notification', 'Stop', 'SubagentStop', 'SessionEnd']) hooks[ev] = on('*');
+    hooks.PostToolUse = on('Edit|Write|MultiEdit|NotebookEdit|Bash');
+    fs.writeFileSync(path.join(dir, 'claude-settings.json'), JSON.stringify({ hooks }, null, 2) + '\n');
+    // codex 的 notify 是整个数组覆盖：用户 ~/.codex/config.toml 里原有的通知程序（如 Codex Computer Use）
+    // 会被顶掉，所以脚本末尾接力调用它、原参数照传
+    const orig = codexUserNotify();
+    const q = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+    const sh = ['#!/bin/sh', '# FanBox 启动时生成：把 Codex notify 事件（JSON 是最后一个参数）转发给 FanBox；$FANBOX_* 来自终端环境',
+      'for last; do :; done',
+      `[ -n "$FANBOX_CTL" ] && ${HOOK_CURL} "$last" >/dev/null 2>&1`,
+      orig.length ? `exec ${orig.map(q).join(' ')} "$@"` : 'exit 0', ''].join('\n');
+    const shPath = path.join(dir, 'codex-notify.sh');
+    fs.writeFileSync(shPath, sh);
+    fs.chmodSync(shPath, 0o755);
+  } catch (e) { console.error('[fanbox] hooks 文件写入失败：', e.message); }
+}
+// 只读 ~/.codex/config.toml 顶层的 notify = ["程序", "参数"…]，粗解析够用（不动这个文件）
+function codexUserNotify() {
+  try {
+    const m = fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8').match(/^notify\s*=\s*\[([^\]]*)\]/m);
+    return m ? [...m[1].matchAll(/"((?:\\.|[^"\\])*)"/g)].map((x) => x[1].replace(/\\(["\\])/g, '$1')) : [];
+  } catch { return []; }
+}
 
 // ---------- 后端子进程 ----------
 // server.js 跑在 utilityProcess 里（入口 server-child.js）。agent 能力（pty 都活在
@@ -132,6 +172,7 @@ app.whenReady().then(() => {
     try { app.dock.setIcon(nativeImage.createFromPath(path.join(__dirname, '..', 'build', 'icon.png'))); } catch { /* */ }
   }
   app.setName('FanBox');
+  writeHookFiles(); // 每次启动重写，随版本升级自动更新，用户不用管
   startBackendServer(); // utilityProcess 只能在 ready 之后 fork；窗口加载自带重试，等它起
 
   // 后端跑在 localhost，访问它永不该走代理。个别环境（clash 强制系统代理、企业 PAC 把 loopback 也代理）
@@ -364,7 +405,10 @@ let wechatConnected = false; // 微信 ClawBot 当前是否连着（bridge 回�
 // ---- agent 工作状态检测：前台不是裸 shell = 终端里有东西在跑（和微信 termControl 同一判据）----
 const BARE_SHELL = /^-?(zsh|bash|sh|fish|login)$/i;
 function termBusyAny() {
-  for (const p of terminals.values()) {
+  for (const [id, p] of terminals) {
+    // 有官方 hook 事实的终端只认它说的：claude 空闲等输入时前台进程仍是 claude，旧判据会一直「忙」不让 Mac 睡
+    const f = termFacts.get(id);
+    if (f) { if (f.state === 'working') return true; continue; }
     const proc = (p && p.process) || '';
     if (proc && !BARE_SHELL.test(proc)) return true;
   }
@@ -665,6 +709,7 @@ ipcMain.handle('pty:spawn', (e, { id, cwd, cols, rows, theme }) => {
     termTails.delete(id);
     termBufs.delete(id);
     termLastOut.delete(id);
+    termFacts.delete(id);
     refreshLidGuard(); // 最后一个终端退出即恢复休眠
     recStop(id);
     if (win && !win.isDestroyed()) win.webContents.send('pty:exit', { id, exitCode });
@@ -783,13 +828,67 @@ async function agentList() {
   for (const [id, p] of terminals) {
     const proc = (p && p.process) || '';
     const cwd = await termCwdByPid(p && p.pid);
+    const f = termFacts.get(id); // hooked 终端的忙闲/状态来自 agent 自己的事件，比看前台进程准
     arr.push({
       id, cwd, name: cwd ? path.basename(cwd) : '', proc,
-      busy: !!proc && !BARE_SHELL_RE.test(proc),
+      busy: f ? f.state === 'working' : !!proc && !BARE_SHELL_RE.test(proc),
+      state: f ? f.state : null, hooked: !!f,
       tail: (termTails.get(id) || '').slice(-500),
     });
   }
   return { ok: true, terminals: arr };
+}
+// 官方 hook 事件入口（/api/agent/event → RPC → 这里）。claude 看 hook_event_name，codex 看 type。
+// 状态机：SessionStart/UserPromptSubmit/PreToolUse → working；Notification permission_prompt → needs_permission；
+// idle_prompt / agent_needs_input → needs_input；Stop / agent_completed → done；SessionEnd → ended（事实随即清掉，
+// 裸 shell 回到旧判据）；codex 的 *turn-complete → done，其他 → working。每个事件都广播给渲染层。
+function agentEvent(termId, body) {
+  const id = String(termId || '');
+  if (!terminals.has(id)) return { ok: false, error: 'no such terminal' };
+  const b = body && typeof body === 'object' ? body : {};
+  // 先认清是谁的事件再建事实：认不出的 body 不能留下一条空「working」，否则这个终端永远算忙
+  const kind = typeof b.hook_event_name === 'string' ? 'claude' : typeof b.type === 'string' ? 'codex' : '';
+  if (!kind) return { ok: false, error: 'unknown event' };
+  const now = Date.now();
+  let f = termFacts.get(id);
+  if (!f) termFacts.set(id, f = { agent: kind, sessionId: '', state: 'working', since: now, lastEventAt: now, hooked: true, changed: new Map() });
+  let event, state = f.state, file = '';
+  if (kind === 'claude') {
+    f.agent = 'claude'; event = b.hook_event_name;
+    if (b.session_id) f.sessionId = String(b.session_id);
+    if (event === 'SessionStart' || event === 'UserPromptSubmit' || event === 'PreToolUse' || event === 'SubagentStop') state = 'working';
+    else if (event === 'Stop') state = 'done';
+    else if (event === 'SessionEnd') state = 'ended';
+    else if (event === 'Notification') {
+      const nt = String(b.notification_type || '');
+      if (nt === 'permission_prompt') state = 'needs_permission';
+      else if (nt === 'idle_prompt' || nt === 'agent_needs_input') state = 'needs_input';
+      else if (nt === 'agent_completed') state = 'done';
+      event += ':' + nt;
+    } else if (event === 'PostToolUse') {
+      state = 'working';
+      const tool = String(b.tool_name || '');
+      const p = b.tool_input && (b.tool_input.file_path || b.tool_input.notebook_path);
+      if (tool !== 'Bash' && typeof p === 'string' && p) { // Bash 不记文件：改了什么它自己也说不清
+        file = p;
+        const c = f.changed.get(p) || { n: 0, lastAt: 0, tool };
+        c.n++; c.lastAt = now; c.tool = tool;
+        if (!f.changed.has(p) && f.changed.size >= 500) f.changed.delete(f.changed.keys().next().value);
+        f.changed.set(p, c);
+      }
+    }
+  } else {
+    f.agent = 'codex'; event = b.type;
+    if (b['thread-id']) f.sessionId = String(b['thread-id']);
+    state = /turn-(complete|ended)/.test(event) ? 'done' : 'working';
+  }
+  const changed = state !== f.state;
+  if (changed) f.since = now;
+  f.state = state; f.lastEventAt = now;
+  if (win && !win.isDestroyed()) win.webContents.send('agent:event', { id, state, event, file: file || undefined, agent: f.agent });
+  if (state === 'ended') termFacts.delete(id);
+  if (changed) refreshLidGuard(); // 收工/开工立刻结算电源守卫，不等 30s 轮询
+  return { ok: true, id, state };
 }
 function agentRead(id, lines) {
   if (!terminals.has(id)) return { ok: false, error: 'no such terminal' };
@@ -874,7 +973,7 @@ function agentKill(id) {
   catch (e) { return { ok: false, error: String(e && e.message || e) }; }
 }
 // server.js 在子进程里经 RPC 桥调这组能力（见 startBackendServer）；token 走 fork env
-const agentImpl = { list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill };
+const agentImpl = { list: agentList, read: agentRead, send: agentSend, create: agentCreate, wait: agentWait, kill: agentKill, event: agentEvent };
 
 // ---------- 录制文件管理 IPC ----------
 // 列表：读每个 .cast 的头行拿元信息 + 文件大小/时长（末事件时间），按新→旧。失败的文件跳过不报错。
