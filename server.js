@@ -1389,6 +1389,65 @@ async function snapFileDiff(file) {
     original: show.ok ? show.stdout : '', modified, isNew: !show.ok,
   };
 }
+// 「基准版本」定位：和「查看改动」用同一把尺——git 仓库以 HEAD 为基准（影子 tag 不是用户仓库里的 ref，
+// 在这里没意义），非 git 项目落到影子仓库，tag 缺省取最新一次快照（HEAD）。两边都没有返回 null。
+async function baseLocate(file, tag) {
+  file = snapReal(resolvePath(file));
+  const root = await gitRoot(path.dirname(file));
+  let b = null;
+  if (root) b = { kind: 'git', root, rel: path.relative(root, file), ref: 'HEAD' };
+  else {
+    const project = await snapResolveProject(path.dirname(file));
+    if (!project) return null;
+    const ref = /^(s\d{10,16}|[0-9a-f]{7,40})$/i.test(String(tag || '')) ? String(tag) : 'HEAD'; // 快照 tag 名或 commit hash 都行
+    b = { kind: 'shadow', root: project, gitDir: snapGitDir(project), rel: path.relative(project, file), ref };
+  }
+  if (!b.rel || b.rel.startsWith('..')) return null;
+  b.rel = b.rel.split(path.sep).join('/');
+  b.file = file;
+  return b;
+}
+function baseExec(b, args, timeout) {
+  return b.kind === 'git' ? execGit(['-C', b.root, ...args], b.root) : execSnap(b.gitDir, b.root, args, timeout);
+}
+// 基准版本的原始字节（图片前后对比要旧图）。execFile 默认按 utf8 转字符串会把二进制打烂，这里必须 buffer
+function baseBlob(b) {
+  const args = b.kind === 'git' ? ['-C', b.root, 'show', `${b.ref}:${b.rel}`] : ['--git-dir', b.gitDir, '--work-tree', b.root, 'show', `${b.ref}:${b.rel}`];
+  return new Promise((resolve) => {
+    execFile('git', args, { cwd: b.root, timeout: 10000, maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' }, (err, stdout) => resolve(err ? null : stdout));
+  });
+}
+// 本回合面板按需算的 +/- 行数：不能一开面板就全算，所以单文件一个端点，悬停到哪行算哪行
+async function changeStat(p, tag) {
+  const b = await baseLocate(p, tag);
+  if (!b) return { ok: false, error: '没有基准版本' };
+  const has = await baseExec(b, ['cat-file', '-e', `${b.ref}:${b.rel}`]);
+  if (!has.ok) { // 基准里没有 = 本回合新建：全是新增行
+    let n = 0;
+    try { const t = await fsp.readFile(b.file, 'utf8'); n = t ? t.split('\n').length : 0; } catch { /* 已被删掉 */ }
+    return { ok: true, isNew: true, add: n, del: 0 };
+  }
+  const r = await baseExec(b, ['diff', '--numstat', b.ref, '--', b.rel], 15000);
+  const m = /^(\S+)\t(\S+)\t/.exec(r.stdout || '');
+  if (!m) return { ok: true, add: 0, del: 0, same: true };
+  if (m[1] === '-') return { ok: true, binary: true };
+  return { ok: true, add: Number(m[1]), del: Number(m[2]) };
+}
+// 单文件还原：把这一个文件退回基准版本，项目其他文件不动（整项目回滚是另一条路 snapRestore）。
+// 基准里没有这个文件（本回合新建的）时，「还原」的含义就是它不该存在——移入废纸篓，可从废纸篓找回
+async function snapRestoreFile(file, tag) {
+  const b = await baseLocate(file, tag);
+  if (!b) return { ok: false, error: '这个文件既不在 git 仓库里，也没有回合存档' };
+  const has = await baseExec(b, ['cat-file', '-e', `${b.ref}:${b.rel}`]);
+  if (!has.ok) {
+    const t = await trashPath(b.file);
+    return t.ok ? { ok: true, trashed: true } : { ok: false, error: '基准里没有这个文件，移入废纸篓也失败了：' + (t.error || '') };
+  }
+  const r = await baseExec(b, ['checkout', b.ref, '--', b.rel], 20000);
+  if (!r.ok) return { ok: false, error: '还原失败：' + (r.stderr || '').slice(0, 200) };
+  if (b.kind === 'shadow') snapThrottle.delete(b.root); // 还原后下一轮开工要能立刻存档
+  return { ok: true, restored: true, base: b.kind === 'git' ? 'HEAD' : b.ref };
+}
 
 // 图片编辑保存：前端 canvas 导出 dataURL（已含格式/尺寸/质量/标注），这里原子写回
 async function saveImage({ path: target, dataUrl, newName }) {
@@ -2762,6 +2821,22 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/snapshot-restore' && req.method === 'POST') {
       const b = await readBody(req);
       return sendJSON(res, 200, await snapRestore(pathArg(b.path, 'path'), b.hash));
+    }
+    // 本回合面板：单文件还原 / 基准版本原始字节 / 按需 +/- 行数（都以 baseLocate 的同一把尺为基准）
+    if (p === '/api/snapshot-restore-file' && req.method === 'POST') {
+      const b = await readBody(req);
+      return sendJSON(res, 200, await snapRestoreFile(pathArg(b.file, 'file'), b.tag));
+    }
+    if (p === '/api/change-stat') {
+      return sendJSON(res, 200, await changeStat(pathArg(qp.get('path'), 'path'), qp.get('tag')));
+    }
+    if (p === '/api/base-file') {
+      const b = await baseLocate(pathArg(qp.get('path'), 'path'), qp.get('tag'));
+      const buf = b ? await baseBlob(b) : null;
+      if (!buf) { res.writeHead(404); res.end('no base version'); return; }
+      res.writeHead(200, { 'Content-Type': MIME[ext(b.file)] || 'application/octet-stream', 'Content-Length': buf.length, 'Cache-Control': 'no-store' });
+      res.end(buf);
+      return;
     }
     if (p === '/api/open' && req.method === 'POST') {
       const body = await readBody(req);
