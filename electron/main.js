@@ -671,7 +671,8 @@ function buildMenu() {
       { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' },
       { type: 'separator' }, { role: 'togglefullscreen', label: M('全屏', 'Full Screen') },
       ...(isMac ? [{ type: 'separator' }, {
-        // 合盖继续干活：仅在检测到 agent 正在干活时真正生效（智能模式）；勾选状态反映用户意图
+        // 合盖继续干活：仅在检测到 agent 正在干活时真正生效（智能模式）；勾选状态反映用户意图。
+        // 侧栏也有这个开关（高频），两边读同一份 power:state、改完都广播 power:changed，勾选不会打架
         label: lidActive ? M('合盖继续干活（生效中）', 'Keep working with lid closed (active)') : M('合盖继续干活', 'Keep working with lid closed'),
         type: 'checkbox', checked: lidIntent,
         click: (item) => { setLidIntent(item.checked); },

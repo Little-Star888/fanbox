@@ -28,6 +28,14 @@ window.FANBOX_DICT = {
   '终端核 Volt': 'Terminal-core Volt',
   '编辑式 · 索引日报': 'Editorial · index daily',
   '本地运行 · 数据不出本机': 'Runs locally · data never leaves this Mac',
+  // 侧栏「合盖继续干活」开关
+  '合盖继续干活': 'Keep working, lid closed',
+  '翻箱盯着每个终端窗口的工作状态。开启后：只要检测到有 agent 正在干活，合上盖子 Mac 也不休眠，任务接着跑；所有终端都空闲约两分钟后，自动恢复正常休眠——不会让 Mac 一直不睡。': 'FanBox watches what each terminal is doing. When any agent is actively working, closing the lid won\'t sleep the Mac — the task keeps going. Once every terminal has been idle for ~2 minutes, normal sleep resumes automatically.',
+  '合盖跑任务持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。': 'Running with the lid closed keeps drawing power and heat — stay plugged in. First time needs your admin password once (installs a power-only passwordless rule).',
+  '现在：未开启，合盖照常休眠': 'Now: off — the Mac sleeps as usual when the lid closes',
+  '现在：没有终端会话 → 合盖照常休眠': 'Now: no terminal sessions → normal sleep on lid close',
+  '已开启 · agent 干活时合盖不休眠': 'On · no sleep while agents are working, even lid closed',
+  '已关闭 · 合盖照常休眠': 'Off · normal sleep on lid close',
   // 版本号
   '版本历史': 'Release history',
   // 定时任务
@@ -513,6 +521,9 @@ window.FANBOX_DICT = {
 };
 // 含插值的动态文案：正则 → 替换式（$1 等捕获组），EN 模式下逐条尝试
 window.FANBOX_DICT_RULES = [
+  // 侧栏「合盖继续干活」悬停卡的状态行（终端数动态）
+  [/^现在：(\d+) 个终端开着，agent 正在干活 → 生效中，合盖也不休眠$/, (m) => `Now: ${m[1]} terminal(s) open, agents working → active, no sleep on lid close`],
+  [/^现在：(\d+) 个终端开着但都空闲 → 合盖照常休眠$/, (m) => `Now: ${m[1]} terminal(s) open but all idle → normal sleep on lid close`],
   // agent 启动按钮（动态生成的 title/toast）
   [/^启动 (.+)：空闲终端就地启动，正跑着任务则新开标签$/, (m) => `Launch ${m[1]}: starts in the idle terminal, or opens a new tab if one is busy`],
   [/^打开 (.+) 桌面应用（该产品无终端 CLI 形态）$/, (m) => `Open the ${m[1]} desktop app (no terminal CLI available)`],

@@ -164,6 +164,19 @@ kbd {
 .side-link:hover { background: var(--bg-3); color: var(--text); }
 .side-link svg { flex-shrink: 0; }
 
+/* 合盖继续干活：工具簇里唯一的开关行，行高与 .side-link 对齐，右侧一个状态点 + 拨杆 */
+.pw-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; user-select: none; color: var(--text-dim); transition: 0.12s; }
+.pw-row.hidden { display: none; }
+.pw-row:hover { background: var(--bg-3); color: var(--text); }
+.pw-row > svg { flex-shrink: 0; }
+.pw-label { flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pw-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex: 0 0 6px; }
+.pw-dot.lit { background: #07C160; box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.16); }
+.pw-switch { flex: none; width: 30px; height: 17px; border: 1px solid var(--border); border-radius: 99px; background: var(--bg-3); position: relative; cursor: pointer; transition: 0.15s; }
+.pw-switch i { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--text-faint); transition: 0.15s; }
+.pw-switch.on { background: var(--accent); border-color: var(--accent); }
+.pw-switch.on i { left: 15px; background: var(--accent-ink); }
+
 /* ---------- Agent 用量（侧栏底部，可开合）---------- */
 #usage-arrow { margin-left: auto; font-size: 10px; }
 #usage-body { padding: 8px 8px 2px; font-size: 12px; }

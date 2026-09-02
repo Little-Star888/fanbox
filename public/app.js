@@ -3250,6 +3250,48 @@ function updateGridSizeVisibility() {
   $('#gridsize-seg').style.display = state.view === 'grid' ? '' : 'none';
 }
 
+// ---------- 侧栏「合盖继续干活」开关（macOS 桌面版专属）----------
+// 出门前顺手一勾属高频动作，常驻侧栏；成对的「微信遥控不断线」低频，只在原生「视图」菜单里。
+// 两边读同一份 power:state，主进程改了会广播 power:changed，勾选状态永远一致。
+const powerBar = {
+  st: null,
+  async init() {
+    if (!window.fanboxPower) return; // 浏览器版 / 老 preload：整行不显示
+    const st = await window.fanboxPower.state().catch(() => null);
+    if (!st || st.platform !== 'darwin') return; // 禁休眠靠 pmset，仅 macOS
+    this.st = st;
+    $('#pw-lid').classList.remove('hidden');
+    $('#pw-lid').onclick = () => this.flip();
+    sideHoverCard($('#pw-lid'), () => this.tip());
+    window.fanboxPower.onChange((m) => { this.st = m; this.sync(); });
+    this.sync();
+  },
+  async flip() {
+    const on = !(this.st && this.st.lid);
+    const r = await window.fanboxPower.setLid(on).catch(() => null);
+    if (r) { this.st = r; this.sync(); }
+    if (r && r.ok) toast(r.on ? '已开启 · agent 干活时合盖不休眠' : '已关闭 · 合盖照常休眠');
+    else if (r && r.error && r.error !== 'cancelled' && r.error !== 'setup-cancelled') toast('开启失败：' + r.error, true);
+  },
+  sync() {
+    const st = this.st; const el = $('#pw-lid'); if (!st || !el) return;
+    el.querySelector('.pw-switch').classList.toggle('on', !!st.lid);
+    el.querySelector('.pw-dot').classList.toggle('lit', !!st.lidHolding); // 点亮 = 此刻真的拦着休眠
+  },
+  tip() {
+    const st = this.st || {};
+    let now;
+    if (!st.lid) now = '现在：未开启，合盖照常休眠';
+    else if (st.lidHolding) now = `现在：${st.terms} 个终端开着，agent 正在干活 → 生效中，合盖也不休眠`;
+    else if (st.terms > 0) now = `现在：${st.terms} 个终端开着但都空闲 → 合盖照常休眠`;
+    else now = '现在：没有终端会话 → 合盖照常休眠';
+    return `<b>合盖继续干活</b>
+      <p>翻箱盯着每个终端窗口的工作状态。开启后：只要检测到有 agent 正在干活，合上盖子 Mac 也不休眠，任务接着跑；所有终端都空闲约两分钟后，自动恢复正常休眠——不会让 Mac 一直不睡。</p>
+      <p class="tip-note">合盖跑任务持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。</p>
+      <p class="tip-state">${escapeHtml(now)}</p>`;
+  },
+};
+
 // ---------- 主题 / 皮肤 ----------
 function applyTheme(skin, rerender = true) {
   if (!['terminal', 'warm', 'editorial'].includes(skin)) skin = 'terminal';
@@ -6055,6 +6097,7 @@ async function init() {
   await Promise.all([loadRoots(), loadFavorites(), navigate(lastDir || '', false)]);
   if (!state.cwd) await navigate(state.home, false);
   renderRootsActive(); // 列表可能比侧栏先到，这时侧栏还没东西可高亮，补一次
+  powerBar.init();
   verInfo.init();
   cronPanel.syncBadge();
   loadAgentProjects();
