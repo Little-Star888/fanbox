@@ -4442,7 +4442,8 @@ const term = {
       const dotState = s.dead ? 'dead' : (s.status === 'busy' ? 'busy' : 'idle');
       const followed = follow.on && follow.sid === s.id; // 文件跟随正盯着这个 tab
       t.className = 'term-tab' + (s.id === this.active ? ' active' : '') + (s.unread ? ' unread' : '') + (followed ? ' following' : '');
-      const dotTitle = s.dead ? '进程已退出' : (s.status === 'busy' ? 'agent 运行中' : '空闲');
+      const dotTitle = roster.dotTitle(s); // 干活中带已跑时长（roster 每秒刷）
+      t.dataset.id = s.id;
       // 终端图标按项目路径染色：同项目同色，和面包屑的配对色点呼应
       const hue = this.hueOf(s.cwd || s.startDir);
       t.title = followed ? '文件跟随正盯着这个终端 · 双击跳到它所在目录' : '双击：文件区跳到该终端所在目录';
@@ -4461,8 +4462,10 @@ const term = {
 };
 
 // ---------- 指挥台：谁在等我 ----------
-// 真机 5 个 claude 并行时，状态只有标签上的小圆点，「下一个该看谁」全靠脑内记账。这里把每个会话摊成一行：
-// 状态（形状 + 颜色 + 文字三重编码，色弱也分得清）、项目、agent、已跑时长、最后一句话、本回合改了几个文件；
+// 真机 5 个 claude 并行时，状态只有标签上的小圆点，「下一个该看谁」全靠脑内记账。这里把在等你的会话摊成一行：
+// 状态（形状 + 颜色 + 文字三重编码，色弱也分得清）、项目、agent、最后一句话、本回合改了几个文件；
+// 只列需要你的（等你确认 / 等你输入 / 刚完成没看）——干活中的标签栏已经有名字和闪点，再列一遍是第二份；
+// 干活中的已跑时长挂在标签圆点的 hover 提示里。没人等你整条消失，所以条一出现就是有事找你。
 // 只在会话 ≥ 2 时出现（一个会话没有「谁在等我」的问题）。⌘⌥L 循环跳到下一个需要你的；「需要你」的数量同步到 Dock 角标。
 // hooked 会话吃 hooks 事件态，未 hooked 的沿用 busy/idle + 确认文案判定——所以对任何 agent、裸 shell 都管用
 const roster = {
@@ -4512,12 +4515,11 @@ const roster = {
   rowHtml(s, st) {
     const hue = term.hueOf(s.cwd || s.startDir);
     const icon = s.agent ? this.agentIcon(s.agent) : ic('term', `hsl(${hue} 62% 48%)`, 12);
-    const dur = st === 'working' ? `<span class="tr-dur">${this.dur(Date.now() - (s.busyStart || Date.now()))}</span>` : '';
     const fresh = st === 'idle' && s._fresh ? '<span class="tr-tag">刚完成</span>' : '';
     const n = this.changed(s);
     return `<div class="tr-row st-${st}${s.id === term.active ? ' active' : ''}" data-id="${s.id}" title="点击切到该标签">
       <span class="tr-shape" title="${this.LABEL[st]}">${this.SHAPE[st]}</span><span class="tr-agent">${icon}</span><span class="tr-name">${escapeHtml(s.title || 'shell')}</span>
-      <span class="tr-st">${this.LABEL[st]}</span>${dur}${fresh}<span class="tr-say">${this.say(s, st)}</span><span class="tr-files"${n ? ` title="本回合改动 ${n} 个文件"` : ''}>${n ? n + ' 文件' : ''}</span></div>`;
+      <span class="tr-st">${this.LABEL[st]}</span>${fresh}<span class="tr-say">${this.say(s, st)}</span><span class="tr-files"${n ? ` title="本回合改动 ${n} 个文件"` : ''}>${n ? n + ' 文件' : ''}</span></div>`;
   },
   render() {
     const box = $('#term-roster'); if (!box) return;
@@ -4525,24 +4527,26 @@ const roster = {
     // Dock 角标：几个会话在等你。不看指挥台显不显示——一个会话在等你也该亮
     const need = list.filter((x) => this.tier(x.s, x.st)).length;
     if (need !== this._badge && window.fanboxWin && window.fanboxWin.setBadge) { this._badge = need; window.fanboxWin.setBadge(need ? String(need) : ''); }
-    const show = list.length >= 2;
+    list.some((x) => x.st === 'working') ? this.startTick() : this.stopTick(); // 有人干活就每秒刷标签上的已跑时长
+    const rows = list.filter((x) => this.tier(x.s, x.st));
+    const show = list.length >= 2 && rows.length > 0;
     box.classList.toggle('hidden', !show);
-    if (!show) { box.innerHTML = ''; this.stopTick(); if (this._h) { this._h = 0; term.fitActive(); } return; }
-    box.innerHTML = list.map(({ s, st }) => this.rowHtml(s, st)).join('');
-    box.querySelectorAll('.tr-row').forEach((el) => { el.onclick = () => term.activate(el.dataset.id); });
-    const h = box.offsetHeight;
-    if (h !== this._h) { this._h = h; term.fitActive(); } // 条的高度变了（出现/行数变）xterm 得重新量行数
-    list.some((x) => x.st === 'working') ? this.startTick() : this.stopTick();
+    if (!show) box.innerHTML = '';
+    else {
+      box.innerHTML = rows.map(({ s, st }) => this.rowHtml(s, st)).join('');
+      box.querySelectorAll('.tr-row').forEach((el) => { el.onclick = () => term.activate(el.dataset.id); });
+    }
+    const h = show ? box.offsetHeight : 0;
+    if (h !== this._h) { this._h = h; term.fitActive(); } // 条的高度变了（出现/消失/行数变）xterm 得重新量行数
   },
-  // 干活中的行每秒刷时长 / 最后一句 / 改动数，不整条重画（重画会抖 hover）
+  dotTitle(s) { return s.dead ? '进程已退出' : (s.status === 'busy' ? `agent 运行中 · 已跑 ${this.dur(Date.now() - (s.busyStart || Date.now()))}` : '空闲'); },
+  // 每秒刷标签圆点提示里的已跑时长；指挥台里的行（在等你的）不重画，重画会抖 hover
   startTick() {
     if (this._tick) return;
     this._tick = setInterval(() => {
-      document.querySelectorAll('#term-roster .tr-row').forEach((el) => {
+      document.querySelectorAll('#term-tabs .term-tab').forEach((el) => {
         const s = term.sessions.find((x) => x.id === el.dataset.id); if (!s) return;
-        const d = el.querySelector('.tr-dur'); if (d) d.textContent = this.dur(Date.now() - (s.busyStart || Date.now()));
-        el.querySelector('.tr-say').innerHTML = this.say(s, this.stateOf(s));
-        const n = this.changed(s); el.querySelector('.tr-files').textContent = n ? n + ' 文件' : '';
+        const d = el.querySelector('.tab-dot'); if (d) d.title = this.dotTitle(s);
       });
     }, 1000);
   },
