@@ -100,6 +100,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      additionalArguments: [`--fanbox-ctl-token=${AGENT_TOKEN}`], // 渲染层写接口的门票，preload 读 argv 暴露为 fanboxEnv.ctlToken
     },
   });
   // 拖动/缩放后防抖记忆，关窗再存一次兜底
@@ -117,10 +118,16 @@ function createWindow() {
   const load = () => win.loadURL(`http://localhost:${PORT}`).catch(() => setTimeout(load, 150));
   setTimeout(load, 250);
 
-  // 外部链接走系统浏览器，不在 app 里开新窗口
+  // 外部链接走系统浏览器；其余协议（file:/javascript:/自定义 scheme）一律不开——页面内容里混进的 window.open 别想开出新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:/.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
-    return { action: 'allow' };
+    if (/^https?:/.test(url)) shell.openExternal(url);
+    return { action: 'deny' };
+  });
+  // 同理挡整窗跳转：md 里一个不带 target 的 <a href="https://…"> 点下去不该把整个 app 导航走
+  win.webContents.on('will-navigate', (e, url) => {
+    if (url.startsWith(`http://localhost:${PORT}`)) return;
+    e.preventDefault();
+    if (/^https?:/.test(url)) shell.openExternal(url);
   });
 
   win.on('closed', () => { win = null; });

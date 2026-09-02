@@ -80,6 +80,8 @@ contextBridge.exposeInMainWorld('fanboxAgentCtl', {
 contextBridge.exposeInMainWorld('fanboxEnv', {
   isDesktopApp: true,
   platform: process.platform,
+  // 写类 /api/* 的门票：主进程经 additionalArguments 递进来。preload 只在主框架跑，预览 iframe（跨源）拿不到
+  ctlToken: (process.argv.find((a) => a.startsWith('--fanbox-ctl-token=')) || '').slice('--fanbox-ctl-token='.length),
 });
 
 // 电源守卫：侧栏「离开电脑」两个开关（合盖继续干活 / 微信遥控不断线），macOS 专属

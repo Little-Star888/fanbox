@@ -88,10 +88,17 @@ function kindOf(name, isDir) {
   return 'other';
 }
 
-// 把任意请求路径规整成绝对真实路径；非绝对路径回退到 HOME。本机个人工具，不做越权拦截，
-// 但拒绝空字节这种明显异常输入。
+// 带 HTTP 状态码的错误：路由层的兜底 catch 按它回 4xx，不再把参数问题当 500
+function httpErr(code, msg) { return Object.assign(new Error(msg), { status: code }); }
+// 写类端点的路径类参数：缺失/非字符串在路由层就 400，不进业务函数——实测一条畸形 JSON 打到 /api/trash，
+// 从前 readBody 回 {}、resolvePath(undefined) 兜到 HOME，整个主目录被送进了废纸篓
+function pathArg(v, name) { if (typeof v !== 'string' || !v) throw httpErr(400, `参数 ${name} 必须是非空字符串`); return v; }
+
+// 把任意请求路径规整成绝对真实路径；相对路径按 HOME 解析。本机个人工具，不做越权拦截，
+// 但拒绝空字节这种明显异常输入。参数漏传/非字符串直接 400——从前兜底成 HOME，
+// 一个 { path: undefined } 的 /api/snapshot 或 /api/trash 就会对整个主目录动手。
 function resolvePath(p) {
-  if (!p || typeof p !== 'string') return HOME;
+  if (!p || typeof p !== 'string') throw httpErr(400, '路径参数必须是非空字符串');
   if (p.includes('\0')) throw new Error('非法路径');
   let abs = p.startsWith('~') ? path.join(HOME, p.slice(1)) : p;
   if (!path.isAbsolute(abs)) abs = path.join(HOME, abs);
@@ -1688,19 +1695,27 @@ async function serveHtmlPreview(req, res, filePath) {
 }
 
 const MAX_BODY = 64 * 1024 * 1024; // 64MB 上限，防止恶意请求无限累加把内存撑爆
+// 从前解析失败/超限静默回 {}：畸形请求会以「空参数」进到写类端点，结合 resolvePath 的 HOME 兜底就是事故；现在一律 4xx
 function readBody(req) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let data = '';
     let size = 0;
     let aborted = false;
     req.on('data', (c) => {
       if (aborted) return;
       size += c.length;
-      if (size > MAX_BODY) { aborted = true; try { req.destroy(); } catch { /* */ } resolve({}); return; }
+      // 超限：停止累加、让流继续排空但不 destroy 连接——413 才送得到对方手里
+      if (size > MAX_BODY) { aborted = true; reject(httpErr(413, '请求体超过 64MB')); return; }
       data += c;
     });
-    req.on('end', () => { if (!aborted) { try { resolve(JSON.parse(data || '{}')); } catch { resolve({}); } } });
-    req.on('error', () => { if (!aborted) { aborted = true; resolve({}); } });
+    req.on('end', () => {
+      if (aborted) return;
+      let b;
+      try { b = JSON.parse(data || '{}'); } catch { return reject(httpErr(400, '请求体不是合法 JSON')); }
+      if (!b || typeof b !== 'object' || Array.isArray(b)) return reject(httpErr(400, '请求体必须是 JSON 对象'));
+      resolve(b);
+    });
+    req.on('error', () => { if (!aborted) { aborted = true; reject(httpErr(400, '请求体读取失败')); } });
   });
 }
 
@@ -2335,6 +2350,16 @@ function originAllowed(req) {
   if (!o) return true;
   try { return ALLOWED_HOSTS.has(new URL(o).hostname); } catch { return false; }
 }
+// Origin 校验只挡浏览器里的跨站页面，挡不住本机其他进程 curl（无 Origin 即放行）——任何本机进程都能
+// POST /api/cron/save 塞一条 shell 任务再 /api/cron/run。桌面 app 模式下再加一道 token（与 /api/agent/*
+// 同一把：主进程随机生成、不落盘，经 preload 只交给渲染层主页面、经环境变量只交给翻箱自开的终端；
+// 预览 iframe 跨源拿不到，本机别的进程无从读取）。浏览器模式（node server.js 直跑，无 token）维持 Origin 校验不变。
+const CTL_TOKEN = process.env.FANBOX_AGENT_TOKEN || '';
+function ctlTokenOk(req, qp) {
+  if (!CTL_TOKEN) return true;
+  const tok = req.headers['x-fanbox-token'] || qp.get('token') || '';
+  return tok === CTL_TOKEN;
+}
 
 // ---------- 定时任务：cron.json 持久化 + 到点开终端窗口跑 agent/命令 ----------
 // 设计：调度器只在 FanBox 跑着时活着（本地工具，不装 launchd 常驻）；app 没开时错过的
@@ -2534,6 +2559,8 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
   const qp = url.searchParams;
+  // 写类/执行类端点全走 POST：一道门统一校验，不逐个端点列（漏一个就是洞）。/api/agent/* 自带同一把 token 的校验
+  if (req.method === 'POST' && !p.startsWith('/api/agent/') && !ctlTokenOk(req, qp)) return sendJSON(res, 403, { ok: false, error: 'bad token' });
 
   try {
     if (p === '/api/roots') {
@@ -2610,18 +2637,18 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/snapshot' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await snapshot(b.path, b.label));
+      return sendJSON(res, 200, await snapshot(pathArg(b.path, 'path'), b.label));
     }
     if (p === '/api/snapshots') {
       return sendJSON(res, 200, await snapList(qp.get('path')));
     }
     if (p === '/api/snapshot-restore' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await snapRestore(b.path, b.hash));
+      return sendJSON(res, 200, await snapRestore(pathArg(b.path, 'path'), b.hash));
     }
     if (p === '/api/open' && req.method === 'POST') {
       const body = await readBody(req);
-      const result = await openInOS(resolvePath(body.path), body.with);
+      const result = await openInOS(resolvePath(pathArg(body.path, 'path')), body.with);
       // 记录最近打开（串行 RMW，不丢更新）
       if (result.ok) {
         await updateConfig((cfg) => { cfg.recentOpened = [body.path, ...(cfg.recentOpened || []).filter((x) => x !== body.path)].slice(0, 30); });
@@ -2632,6 +2659,7 @@ const server = http.createServer(async (req, res) => {
       // 内部预览/编辑也记入「最近打开」，去重 + 最近优先（串行 RMW）
       const body = await readBody(req);
       if (body.path) {
+        pathArg(body.path, 'path');
         const cfg = await updateConfig((c) => { c.recentOpened = [body.path, ...(c.recentOpened || []).filter((x) => x !== body.path)].slice(0, 30); });
         return sendJSON(res, 200, { ok: true, recentOpened: cfg.recentOpened });
       }
@@ -2639,6 +2667,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/write' && req.method === 'POST') {
       const b = await readBody(req);
+      pathArg(b.path, 'path');
       try { return sendJSON(res, 200, await writeTextFile(b.path, b.content, b.expectedMtime)); }
       catch (e) { return sendJSON(res, 200, { ok: false, conflict: !!e.conflict, error: e.message }); }
     }
@@ -2658,34 +2687,37 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, { ok: true, lang });
     }
     if (p === '/api/organize/launch' && req.method === 'POST') {
-      return sendJSON(res, 200, await organizeLaunch(await readBody(req)));
+      const b = await readBody(req); pathArg(b.path, 'path');
+      return sendJSON(res, 200, await organizeLaunch(b));
     }
     if (p === '/api/release/inspect') {
       return sendJSON(res, 200, await releaseInspect(url.searchParams.get('path')));
     }
     if (p === '/api/release/prepare' && req.method === 'POST') {
-      return sendJSON(res, 200, await releasePrepare(await readBody(req)));
+      const b = await readBody(req); pathArg(b.path, 'path');
+      return sendJSON(res, 200, await releasePrepare(b));
     }
     if (p === '/api/trash' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await trashPath(b.path));
+      return sendJSON(res, 200, await trashPath(pathArg(b.path, 'path')));
     }
     if (p === '/api/move' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await movePath(b.src, b.dstDir));
+      return sendJSON(res, 200, await movePath(pathArg(b.src, 'src'), pathArg(b.dstDir, 'dstDir')));
     }
     if (p === '/api/rename' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await renamePath(b.path, b.newName));
+      return sendJSON(res, 200, await renamePath(pathArg(b.path, 'path'), b.newName));
     }
     if (p === '/api/image-save' && req.method === 'POST') {
       const body = await readBody(req);
+      pathArg(body.path, 'path');
       try { return sendJSON(res, 200, await saveImage(body)); }
       catch (e) { return sendJSON(res, 200, { error: e.message }); }
     }
     if (p === '/api/create' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await createEntry(b.path, b.name, b.type));
+      return sendJSON(res, 200, await createEntry(pathArg(b.path, 'path'), b.name, b.type));
     }
     if (p === '/api/agents') {
       // coding agent 启动按钮（#38）：GET 回配置，POST 存设置面板勾选的 enabledAgents
@@ -2737,11 +2769,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (p === '/api/skills/toggle' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await skillToggle(b.dir, !!b.enable));
+      return sendJSON(res, 200, await skillToggle(pathArg(b.dir, 'dir'), !!b.enable));
     }
     if (p === '/api/skills/trash' && req.method === 'POST') {
       const b = await readBody(req);
-      return sendJSON(res, 200, await skillTrash(b.dir));
+      return sendJSON(res, 200, await skillTrash(pathArg(b.dir, 'dir')));
     }
     if (p === '/api/agent-usage') {
       return sendJSON(res, 200, await agentUsage());
@@ -2749,6 +2781,7 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/favorites') {
       if (req.method === 'POST') {
         const body = await readBody(req);
+        pathArg(body.path, 'path');
         const cfg = await updateConfig((c) => {
           const has = (c.favorites || []).some((f) => f.path === body.path);
           c.favorites = has
@@ -2789,7 +2822,7 @@ const server = http.createServer(async (req, res) => {
     // 静态资源
     return await serveStatic(req, res, p);
   } catch (err) {
-    return sendJSON(res, 500, { error: err.message });
+    return sendJSON(res, err.status || 500, { error: err.message });
   }
 });
 

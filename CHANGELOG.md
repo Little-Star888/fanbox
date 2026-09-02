@@ -11,6 +11,13 @@
 
 ## [Unreleased]
 
+### Security
+- **md 渲染先过 DOMPurify 再进页面**：md 是 agent 和外部世界写进来的，从前 marked 的输出直接 innerHTML，一张 `<img onerror>` 就能在握着内嵌终端的主页面里跑脚本（PR #60 一个月前指出过）。现在阅读体、跟随预览、编辑器无损校验、微信气泡、版本历史、排版/复制六条路径统一走 `mdHtml()`（marked + DOMPurify），任务清单、details、本地图片、`<img width>`、表格、代码高亮、data-* 照常
+- **页面加 CSP**：脚本只认本地文件，内联脚本和事件属性一律不跑（不放行 `unsafe-eval`）；Monaco 的 worker 走 blob:，HTML 预览 iframe 只允许指向隔离端口。就算有 HTML 漏过净化，也起不来
+- **堵弹窗口子**：HTML 预览 iframe 去掉 `allow-popups`；`window.open` 非 http(s) 一律拒绝，整窗跳转到外站也改为交给系统浏览器，app 本体不会被导航走
+- **写类接口在桌面版要门票**：Origin 校验挡不住本机其他进程直接 curl——任何进程都能 `POST /api/cron/save` 塞一条 shell 任务再 run，或调 /api/trash、/api/write。现在桌面 app 里所有 POST 端点都要带 `x-fanbox-token`（与 /api/agent/* 同一把、每次启动随机生成、不落盘），只有渲染层主页面和翻箱自开终端里的 agent 拿得到；`node server.js` 浏览器模式维持原样
+- **畸形请求不再静默兜底到主目录**：从前请求体解析失败回 `{}`、`resolvePath(undefined)` 落到 HOME——实测一条畸形 JSON 打到 /api/trash，整个（假）HOME 被送进废纸篓。现在解析失败/非对象回 400、超 64MB 回 413，所有写类端点的路径参数缺失或非字符串直接 400
+
 ## [2.14.0] - 2026-08-27
 
 这版不加新功能，专修两类「越用越卡」：拖文件进终端要等十几秒、多图 md 文档把编辑器拖死。

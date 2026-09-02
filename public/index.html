@@ -2,11 +2,15 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <!-- CSP：脚本只认本地文件（内联脚本/事件属性一律不跑）——md 里混进的 <script>/onerror 就算漏过 DOMPurify 也起不来。
+       blob: 给 Monaco 的语言服务 worker；img/connect 放开外链是因为 md 引用远程图片、排版复制要把外链图拉进剪贴板；
+       frame-src 的 localhost:* 是 HTML 预览 iframe 指向的隔离端口（主端口+1）。 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: http: https:; media-src 'self' data: blob: http://localhost:* http://127.0.0.1:*; font-src 'self' data:; connect-src 'self' data: blob: http: https:; frame-src 'self' http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FanBox</title>
   <link rel="stylesheet" href="/style.css" />
   <!-- 内嵌终端（仅桌面 app 启用，浏览器版自动降级）：本地 vendor，离线可用 -->
-  <link rel="stylesheet" href="/vendor/xterm/xterm.css" onerror="window.__noXterm=1" />
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
 </head>
 <body>
   <div id="app">
@@ -201,15 +205,17 @@
   <div id="toast" class="toast hidden"></div>
 
   <!-- marked / highlight.js：本地 vendor，离线可用，数据不出本机 -->
-  <script src="/vendor/marked/marked.min.js" onerror="window.__noMarked=1"></script>
-  <link id="hljs-theme" rel="stylesheet" href="/vendor/hljs/styles/github-dark.min.css" onerror="window.__noHljs=1" />
-  <script src="/vendor/hljs/highlight.js" onerror="window.__noHljs=1"></script>
-  <script src="/vendor/xterm/xterm.js" onerror="window.__noXterm=1"></script>
-  <script src="/vendor/xterm/addon-fit.js" onerror="window.__noXterm=1"></script>
-  <script src="/vendor/xterm/addon-webgl.js" onerror="window.__noWebgl=1"></script>
-  <script src="/vendor/xterm/addon-unicode11.js" onerror="window.__noUnicode11=1"></script>
-  <script src="/vendor/xterm/addon-clipboard.js" onerror="window.__noClipboard=1"></script>
-  <script src="/i18n-dict.js" onerror="window.__noDict=1"></script>
+  <script src="/vendor/marked/marked.min.js"></script>
+  <!-- DOMPurify：marked 的输出进 DOM 前必须过它（md 是 agent 和外部写进来的，主页面握着 pty） -->
+  <script src="/vendor/dompurify/purify.min.js"></script>
+  <link id="hljs-theme" rel="stylesheet" href="/vendor/hljs/styles/github-dark.min.css" />
+  <script src="/vendor/hljs/highlight.js"></script>
+  <script src="/vendor/xterm/xterm.js"></script>
+  <script src="/vendor/xterm/addon-fit.js"></script>
+  <script src="/vendor/xterm/addon-webgl.js"></script>
+  <script src="/vendor/xterm/addon-unicode11.js"></script>
+  <script src="/vendor/xterm/addon-clipboard.js"></script>
+  <script src="/i18n-dict.js"></script>
   <script src="/i18n.js"></script>
   <!-- md 排版档：主题表 + 排版/复制引擎，只在 md 编辑器点「排版」时才用得上 -->
   <script src="/typeset-styles.js"></script>
