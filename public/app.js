@@ -392,7 +392,7 @@ function renderStatusbar() {
   sb.classList.remove('hidden');
   sb.innerHTML = `<span class="sb-links"><a id="sb-mem" title="这个文件夹里 AI 干过什么：历史会话、改过的文件、一键续上">项目记忆</a><a id="sb-snap" title="agent 每轮开工前的自动存档，可一键回到任意一轮之前">回合存档</a></span>`;
   $('#sb-mem').onclick = () => memoryPanel(state.cwd);
-  $('#sb-snap').onclick = () => snapshotPanel(state.cwd);
+  $('#sb-snap').onclick = () => openRoundPanel(); // 回合存档并进「本回合」面板（存档管理从面板里进）
 }
 // 大目录分页：超过这个数只先铺前一页，底部给「显示全部」——几千张卡一次性建 DOM 要好几秒，
 // 而且多数时候用户只是路过这个目录
@@ -860,14 +860,18 @@ function renderHtmlPreview(data, meta) {
   ro.observe(wrap);
   renderHtmlPreview._cleanup = () => { window.removeEventListener('message', onMsg); ro.disconnect(); renderHtmlPreview._cleanup = null; };
 }
-// 查看改动：HEAD 版本 vs 工作区当前内容，用 Monaco 只读 DiffEditor 并排渲染
-async function showDiff(e) {
+// 查看改动：HEAD 版本 vs 工作区当前内容，用 Monaco 只读 DiffEditor 并排渲染。
+// md 默认走「读者视图」（渲染后并排，看发出去长什么样），mode='source' 才是源码 diff；图片走前后对比
+async function showDiff(e, mode) {
   if (follow.on) setFileFollow(false, '手动接管，文件跟随已停');
+  if (e.kind === 'image') return showImageDiff(e);
   const data = await api('/api/git-file?path=' + encodeURIComponent(e.path));
   if (!data.isRepo && !data.shadow) { toast('该文件不在 git 仓库里，也还没有回合存档（跑过 agent 就有了）', true); return; }
   if (!data.diffable) { toast('该类型不支持 diff', true); return; }
   if (!data.isNew && (data.original || '') === (data.modified || '')) { toast(data.shadow ? '与上一回合存档无差异' : '与 HEAD 无差异'); return; }
-  if (!await mona.load()) { toast('编辑器未就绪', true); return; }
+  const isMd = isMdName(e.name);
+  const reader = isMd && mode !== 'source';
+  if (!reader && !await mona.load()) { toast('编辑器未就绪', true); return; }
   if (!await guardDirty()) return;
   mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null;
   showPreviewPanel();
@@ -876,10 +880,76 @@ async function showDiff(e) {
   renderPreviewActions(e);
   renderPreviewFoot(e);
   const body = $('#preview-body');
+  const hint = `${data.isNew ? (data.shadow ? '新文件（上一回合存档时还没有）' : '新文件（HEAD 中不存在）') : (data.shadow ? `左：回合存档（${fmtTime(data.baseTs)}）　·　右：当前` : '左：HEAD　·　右：当前工作区')} · 只读`;
+  // md 两档：读者视图 / 源码 diff（沿用编辑器三档的分段样式）
+  const modes = isMd ? `<span class="seg ed-modes"><button class="seg-btn${reader ? ' active' : ''}" data-dm="reader">读者视图</button><button class="seg-btn${reader ? '' : ' active'}" data-dm="source">源码 diff</button></span>` : '';
   body.innerHTML =
-    `<div class="editor-bar"><span class="editor-hint">${data.isNew ? (data.shadow ? '新文件（上一回合存档时还没有）' : '新文件（HEAD 中不存在）') : (data.shadow ? `左：回合存档（${fmtTime(data.baseTs)}）　·　右：当前` : '左：HEAD　·　右：当前工作区')} · 只读</span><button id="diff-close" class="ghost-btn">返回预览</button></div>` +
-    `<div id="ed-host" class="mona-host"></div>`;
-  mona.openDiff($('#ed-host'), data.original, data.modified, (e.name.split('.').pop() || '').toLowerCase());
+    `<div class="editor-bar diff-bar">${modes}<button id="diff-send" class="ghost-btn" title="把选中的行（或整个文件）连同你的批注粘进当前终端，交给 agent 改">发给 agent</button><span class="editor-hint">${hint}</span><button id="diff-close" class="ghost-btn">返回预览</button></div>` +
+    (reader
+      ? `<div class="diff-reader" id="diff-reader"><div class="diff-col"><div class="diff-col-head">${data.isNew ? '（基准里没有）' : (data.shadow ? '上一回合' : 'HEAD')}</div><div class="read-host diff-read"></div></div><div class="diff-col"><div class="diff-col-head">当前</div><div class="read-host diff-read" id="diff-read-new"></div></div></div>`
+      : `<div id="ed-host" class="mona-host"></div>`);
+  if (reader) {
+    const cols = body.querySelectorAll('.diff-read');
+    cols[0].appendChild(mdReadBody(data.original || '', e.path));
+    cols[1].appendChild(mdReadBody(data.modified || '', e.path));
+  } else {
+    mona.openDiff($('#ed-host'), data.original, data.modified, (e.name.split('.').pop() || '').toLowerCase());
+  }
+  body.querySelectorAll('[data-dm]').forEach((b) => { b.onclick = () => { if (!b.classList.contains('active')) showDiff(e, b.dataset.dm); }; });
+  $('#diff-send').onclick = () => sendDiffReview(e);
+  $('#diff-close').onclick = () => openPreview(e);
+}
+// diff 行评论回喂：取修改侧选区（源码 diff 里是 Monaco 选区，读者视图里是「当前」栏的文字选区），
+// 拼成 `路径:起-止` + 围栏 + 批注，走 sendPrompt 粘进当前终端（bracketed paste、不回车，裸 shell 会被拦下）
+async function sendDiffReview(e) {
+  const rel = e.path.replace(state.home, '~');
+  let text = '', range = '';
+  const de = mona.editor;
+  if (de && de.getModifiedEditor) {
+    const med = de.getModifiedEditor();
+    const sel = med.getSelection();
+    if (sel && !sel.isEmpty()) {
+      text = med.getModel().getValueInRange(sel);
+      // 选区收在下一行行首（整行选法）时，那一行其实没选中
+      const endLine = sel.endColumn === 1 && sel.endLineNumber > sel.startLineNumber ? sel.endLineNumber - 1 : sel.endLineNumber;
+      range = `:${sel.startLineNumber}-${endLine}`;
+    }
+  } else {
+    const s = window.getSelection();
+    const col = $('#diff-read-new');
+    if (s && !s.isCollapsed && col && col.contains(s.anchorNode)) text = s.toString();
+  }
+  const note = await inputDialog(text ? `批注 ${rel}${range}` : `批注整个 ${rel}`, '', '想让 agent 怎么改？');
+  if (note === null) return;
+  const block = `${rel}${range}\n` + (text ? `\`\`\`\n${text}\n\`\`\`\n` : '') + (note ? `批注：${note}\n` : '');
+  await term.sendPrompt(block);
+}
+// 图片前后对比：基准版本（/api/base-file）与当前图叠放，一根滑杆控制上层裁切——纯 CSS/JS，不引依赖
+async function showImageDiff(e) {
+  if (!await guardDirty()) return;
+  const oldUrl = `/api/base-file?path=${encodeURIComponent(e.path)}&v=${e.mtime || 0}`;
+  const head = await fetch(oldUrl, { method: 'HEAD' }).catch(() => null);
+  const hasOld = !!(head && head.ok);
+  mona.disposeIfAny(); crepe.disposeIfAny(); imgEditState = null;
+  showPreviewPanel();
+  applySelection(e.path);
+  $('#preview-title').textContent = (hasOld ? '改动 · ' : '新增 · ') + e.name;
+  renderPreviewActions(e);
+  renderPreviewFoot(e);
+  const body = $('#preview-body');
+  const newUrl = `/api/raw?path=${encodeURIComponent(e.path)}&v=${e.mtime || 0}`;
+  body.innerHTML =
+    `<div class="editor-bar diff-bar"><span class="editor-hint">${hasOld ? '左：基准版本　·　右：当前 · 拖滑杆对比' : '新图片（基准里没有）'}</span><button id="diff-close" class="ghost-btn">返回预览</button></div>` +
+    (hasOld
+      ? `<div class="imgdiff"><div class="imgdiff-stage"><img class="imgdiff-old" src="${oldUrl}" alt="旧"><img class="imgdiff-new" src="${newUrl}" alt="新" style="clip-path:inset(0 0 0 50%)"><div class="imgdiff-bar" style="left:50%"></div><span class="imgdiff-tag imgdiff-tag-old">旧</span><span class="imgdiff-tag imgdiff-tag-new">新</span></div><input type="range" class="imgdiff-range" min="0" max="100" value="50"></div>`
+      : `<img class="pv-img" src="${newUrl}">`);
+  const range = body.querySelector('.imgdiff-range');
+  if (range) {
+    range.oninput = () => {
+      body.querySelector('.imgdiff-new').style.clipPath = `inset(0 0 0 ${range.value}%)`;
+      body.querySelector('.imgdiff-bar').style.left = range.value + '%';
+    };
+  }
   $('#diff-close').onclick = () => openPreview(e);
 }
 function renderPreviewActions(e) {
@@ -2992,7 +3062,7 @@ function bindEvents() {
   $('#preview-close').onclick = closePreview;
   $('#cmdk-trigger').onclick = () => cmdk.open();
   $('#btn-recent').onclick = showRecent;
-  $('#btn-changes').onclick = () => toggleChangesPanel();
+  $('#btn-changes').onclick = () => openRoundPanel(); // 变更收件箱 / 会话回放 / 回合存档三个入口收成「本回合」
   $('#btn-terminal').onclick = () => term.toggle();
   bindAgentButtons();
   usagePanel.bind();
@@ -4905,6 +4975,11 @@ function attributeChange(full, termId, agent) {
   let c = state.changeLog.find((x) => x.path === full);
   if (!c || now - c.ts > 3000) { recordChange(dir, rel); c = state.changeLog.find((x) => x.path === full); }
   if (c) { c.hookTs = now; c.termId = termId; c.agent = agent; }
+  // 时间线上这笔写入也记归属：「本回合」面板按时间窗切回合，靠它把文件分到终端/agent 名下
+  for (let i = state.changeTimeline.length - 1; i >= 0; i--) {
+    const t = state.changeTimeline[i];
+    if (t.path === full) { t.termId = termId; t.agent = agent; break; }
+  }
 }
 function renderChangesBadge() {
   const b = $('#changes-badge'); if (!b) return;
@@ -4953,27 +5028,39 @@ function toggleChangesPanel() {
 }
 // WOW2 会话回放：像刷视频一样拖时间轴，重现这段时间 agent 一步步改了哪些文件
 // 类名/ID 全部带 sreplay- 前缀：和终端录像的 .replay-panel/.replay-list 同名会被后者的
-// 1180×800 + 240px 左栏样式盖掉，#replay-list 还会撞上 index.html 里的同 id
+// 1180×800 + 240px 左栏样式盖掉。独立弹窗版已无入口，逻辑抽成 mountReplay 供「本回合」面板底部嵌用；函数保留
 function openReplay() {
   const tl = state.changeTimeline.slice();
   if (tl.length < 2) { toast('变更太少，先让 agent 多改几下再回放', true); return; }
-  const t0 = tl[0].ts, t1 = tl[tl.length - 1].ts;
-  const span = Math.max(1000, t1 - t0);
   const ov = document.createElement('div');
   ov.className = 'sreplay-ov';
   ov.innerHTML =
     `<div class="sreplay-panel">
-      <div class="sreplay-head"><span>会话回放 · ${tl.length} 次写入 · 跨 ${fmtDur(span / 1000)}</span><button class="sreplay-close ghost-btn">关闭 (Esc)</button></div>
-      <div class="sreplay-now"><span class="rn-label">此刻 agent 正在改</span><span class="rn-file" id="sreplay-now">—</span></div>
-      <div class="sreplay-track" id="sreplay-track"><div class="sreplay-fill" id="sreplay-fill"></div><div class="sreplay-playhead" id="sreplay-playhead"></div></div>
-      <div class="sreplay-ctl"><button id="sreplay-play" class="primary">▶ 播放</button><input type="range" id="sreplay-range" min="0" max="1000" value="1000"><span id="sreplay-count" class="sreplay-count"></span></div>
-      <div class="sreplay-list" id="sreplay-list"></div>
+      <div class="sreplay-head"><span>会话回放 · ${tl.length} 次写入 · 跨 ${fmtDur((tl[tl.length - 1].ts - tl[0].ts) / 1000)}</span><button class="sreplay-close ghost-btn">关闭 (Esc)</button></div>
+      <div class="sreplay-mount"></div>
     </div>`;
   document.body.appendChild(ov);
-  const track = ov.querySelector('#sreplay-track');
+  const rp = mountReplay(ov.querySelector('.sreplay-mount'), tl);
+  const close = () => { rp.stop(); ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
+  document.addEventListener('keydown', onKey, true);
+  ov.querySelector('.sreplay-close').onclick = close;
+  ov.onclick = (e) => { if (e.target === ov) close(); };
+}
+// 回放时间轴本体：挂到任意容器里。tl 是按时间升序的写入记录 [{path,name,ts}]，返回 { stop } 供宿主关闭时停播
+function mountReplay(host, tl) {
+  const t0 = tl[0].ts, t1 = tl[tl.length - 1].ts;
+  const span = Math.max(1000, t1 - t0);
+  host.innerHTML =
+    `<div class="sreplay-now"><span class="rn-label">此刻 agent 正在改</span><span class="rn-file" id="sreplay-now">—</span></div>
+      <div class="sreplay-track" id="sreplay-track"><div class="sreplay-fill" id="sreplay-fill"></div><div class="sreplay-playhead" id="sreplay-playhead"></div></div>
+      <div class="sreplay-ctl"><button id="sreplay-play" class="primary">▶ 播放</button><input type="range" id="sreplay-range" min="0" max="1000" value="1000"><span id="sreplay-count" class="sreplay-count"></span></div>
+      <div class="sreplay-list" id="sreplay-list"></div>`;
+  const q = (s) => host.querySelector(s);
+  const track = q('#sreplay-track');
   tl.forEach((e) => { const t = document.createElement('i'); t.className = 'sreplay-tick'; t.style.left = ((e.ts - t0) / span * 100) + '%'; track.appendChild(t); });
-  const range = ov.querySelector('#sreplay-range');
-  const playBtn = ov.querySelector('#sreplay-play');
+  const range = q('#sreplay-range');
+  const playBtn = q('#sreplay-play');
   let raf = null, playing = false, startWall = 0, startFrac = 0;
   const DURATION = Math.min(20000, Math.max(6000, span / 3)); // 把真实时长压缩到 6–20 秒
   const render = (frac) => {
@@ -4981,12 +5068,12 @@ function openReplay() {
     let lastIdx = -1;
     for (let i = 0; i < tl.length; i++) { if (tl[i].ts <= at) lastIdx = i; else break; }
     const done = lastIdx + 1;
-    ov.querySelector('#sreplay-fill').style.width = (frac * 100) + '%';
-    ov.querySelector('#sreplay-playhead').style.left = (frac * 100) + '%';
-    ov.querySelector('#sreplay-now').textContent = lastIdx >= 0 ? tl[lastIdx].name : '—';
-    ov.querySelector('#sreplay-count').textContent = `${done}/${tl.length}`;
+    q('#sreplay-fill').style.width = (frac * 100) + '%';
+    q('#sreplay-playhead').style.left = (frac * 100) + '%';
+    q('#sreplay-now').textContent = lastIdx >= 0 ? tl[lastIdx].name : '—';
+    q('#sreplay-count').textContent = `${done}/${tl.length}`;
     const recent = tl.slice(Math.max(0, lastIdx - 5), lastIdx + 1).reverse();
-    ov.querySelector('#sreplay-list').innerHTML = recent.map((e, i) => `<div class="rl-row${i === 0 ? ' rl-now' : ''}"><span>${escapeHtml(e.name)}</span><span class="rl-t">${fmtClock(e.ts)}</span></div>`).join('');
+    q('#sreplay-list').innerHTML = recent.map((e, i) => `<div class="rl-row${i === 0 ? ' rl-now' : ''}"><span>${escapeHtml(e.name)}</span><span class="rl-t">${fmtClock(e.ts)}</span></div>`).join('');
   };
   const stop = () => { playing = false; if (raf) cancelAnimationFrame(raf); raf = null; playBtn.textContent = '▶ 播放'; };
   const step = () => {
@@ -5004,12 +5091,136 @@ function openReplay() {
     raf = requestAnimationFrame(step);
   };
   range.oninput = () => { stop(); render(Number(range.value) / 1000); };
-  const close = () => { stop(); ov.remove(); document.removeEventListener('keydown', onKey); };
-  const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
-  document.addEventListener('keydown', onKey, true);
-  ov.querySelector('.sreplay-close').onclick = close;
-  ov.onclick = (e) => { if (e.target === ov) close(); };
   render(1); // 默认停在最终态
+  return { stop };
+}
+
+// ---------- 本回合面板：变更收件箱 + 会话回放 + 回合存档三个入口收成一个 ----------
+// 主链路「agent 完成 → 看到改动 → 收或退」在这一个面板里走完。回合 = 影子仓库的一次快照（agent 开工瞬间存的），
+// 最新一次就是当前回合；落在 [本回合存档, 下一回合存档) 时间窗里的写入归这一回合。hook 报过归属的归到
+// 终端/agent 名下，其余归「文件监听」。+/- 行数悬停到哪行算哪行，不一开面板就全算。
+// agent 正在这个项目里干活时不给回滚（旧存档面板同一条规矩：一边写一边动它的仓库只会两败俱伤）
+function agentBusyIn(project) {
+  let busy = false;
+  term.sessions.forEach((t) => {
+    const c = t.cwd || t.startDir || '';
+    if (!t.dead && t.status === 'busy' && (c === project || c.startsWith(project + '/') || project.startsWith(c + '/'))) busy = true;
+  });
+  return busy;
+}
+async function openRoundPanel() {
+  const old = $('.round-overlay'); if (old) old.remove();
+  const dirPath = state.cwd || state.home;
+  const ov = document.createElement('div');
+  ov.className = 'input-overlay snap-overlay round-overlay';
+  ov.innerHTML = `<div class="input-dialog snap-dialog round-dialog">
+    <div class="input-title round-title"><span>本回合 · ${escapeHtml(dirPath.replace(state.home, '~'))}</span><button class="ghost-btn round-close">关闭 (Esc)</button></div>
+    <div class="snap-body round-body"><div class="cmdk-loading">读存档中…</div></div></div>`;
+  document.body.appendChild(ov);
+  let replay = null;
+  const onKey = (ev) => { if (ev.key === 'Escape') { ev.preventDefault(); close(); } };
+  const close = () => { if (replay) replay.stop(); ov.remove(); document.removeEventListener('keydown', onKey, true); };
+  ov.onclick = (ev) => { if (ev.target === ov) close(); };
+  ov.querySelector('.round-close').onclick = close;
+  document.addEventListener('keydown', onKey, true);
+  const d = await api('/api/snapshots?path=' + encodeURIComponent(dirPath)).catch(() => ({ snaps: [] }));
+  const project = d.project || dirPath;
+  const snaps = d.snaps || []; // 最新在前
+  const body = ov.querySelector('.round-body');
+  const clock = (ts) => {
+    const t = new Date(ts); const hm = `${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`;
+    return t.toDateString() === new Date().toDateString() ? hm : `${t.getMonth() + 1}/${t.getDate()} ${hm}`;
+  };
+  const inProject = (p) => p === project || p.startsWith(project.replace(/\/$/, '') + '/');
+  const groupLabel = (termId, agent) => {
+    if (!termId) return '文件监听';
+    const s = term.sessions.find((x) => x.id === termId);
+    return `终端「${s ? s.title : termId}」 · ${agent || 'agent'}`;
+  };
+  let cur = 0;
+  const done = new Map(); // path → 已还原/已移入废纸篓（面板开着期间记住，fs 监听再报一次也不复活按钮）
+  const render = () => {
+    if (replay) { replay.stop(); replay = null; }
+    const start = snaps.length ? snaps[cur].ts : 0;
+    const end = cur > 0 ? snaps[cur - 1].ts : Infinity;
+    const tl = state.changeTimeline.filter((x) => x.ts >= start && x.ts < end && inProject(x.path));
+    // 按文件聚合：最新一次 hook 归属说了算；一个文件在本回合被写了几次也记着
+    const files = new Map();
+    for (const x of tl) {
+      const f = files.get(x.path) || { path: x.path, name: x.name, count: 0, ts: 0, termId: '', agent: '' };
+      f.count++; f.ts = Math.max(f.ts, x.ts);
+      if (x.termId) { f.termId = x.termId; f.agent = x.agent; }
+      files.set(x.path, f);
+    }
+    const groups = new Map();
+    for (const f of files.values()) { const k = f.termId || ''; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(f); }
+    const keys = [...groups.keys()].sort((a, b) => (a === '' ? 1 : 0) - (b === '' ? 1 : 0)); // 文件监听组垫底
+    const sel = snaps.length
+      ? `<select class="round-sel" title="回合 = agent 开工瞬间的一次存档">${snaps.map((s, i) => `<option value="${i}"${i === cur ? ' selected' : ''}>${i === 0 ? '当前回合 · ' : ''}${clock(s.ts)} · ${escapeHtml(s.label)}</option>`).join('')}</select>`
+      : '<span class="round-sel round-sel-none">还没有存档 · 显示本会话全部改动</span>';
+    body.innerHTML =
+      `<div class="round-top">${sel}<button class="ghost-btn snap-restore round-rollback"${snaps.length ? '' : ' disabled'} title="整个项目回到这一回合开工前的样子（回滚前会再自动存一份）">整回合回滚</button><button class="ghost-btn snap-restore round-manage" title="看存档占用、清理旧存档">存档管理…</button></div>` +
+      (files.size ? keys.map((k) => {
+        const rows = groups.get(k).sort((a, b) => b.ts - a.ts).map((f) => {
+          const rel = f.path.startsWith(project + '/') ? f.path.slice(project.length + 1) : f.path.replace(state.home, '~');
+          const e = { path: f.path, name: f.name, kind: kindFromName(f.path), isDir: false };
+          const dn = done.get(f.path);
+          return `<div class="round-row${dn ? ' rr-done' : ''}" data-path="${escapeHtml(f.path)}">
+            <span class="rr-ic">${iconSvg(e, 16)}</span>
+            <span class="rr-path" title="${escapeHtml(f.path)}">${escapeHtml(rel)}${f.count > 1 ? ` <em class="rr-n">×${f.count}</em>` : ''}</span>
+            <span class="rr-stat" title="悬停算 +/- 行数">${dn ? escapeHtml(dn) : ''}</span>
+            <span class="rr-time">${fmtClock(f.ts)}</span>
+            ${dn ? '' : `<button class="ghost-btn snap-restore" data-act="diff">查看改动</button><button class="ghost-btn snap-restore" data-act="restore" title="只把这一个文件退回本回合开工前（git 项目退回 HEAD）；本回合新建的文件会移入废纸篓">还原此文件</button>`}
+          </div>`;
+        }).join('');
+        return `<div class="round-group">${escapeHtml(groupLabel(k, groups.get(k)[0].agent))} · ${groups.get(k).length}</div>${rows}`;
+      }).join('') : '<div class="round-empty">这一回合还没有捕捉到文件改动。<br>跑起 agent，它改的文件会实时出现在这里。</div>') +
+      `<div class="round-replay"><div class="round-replay-head">回放 · ${tl.length} 次写入${tl.length >= 2 ? ' · 跨 ' + fmtDur((tl[tl.length - 1].ts - tl[0].ts) / 1000) : ''}</div><div class="round-replay-mount">${tl.length < 2 ? '<div class="round-empty">写入太少，没法回放</div>' : ''}</div></div>`;
+    if (tl.length >= 2) replay = mountReplay(body.querySelector('.round-replay-mount'), tl);
+    const selEl = body.querySelector('select.round-sel');
+    if (selEl) selEl.onchange = () => { cur = Number(selEl.value); render(); };
+    body.querySelector('.round-manage').onclick = () => { close(); snapshotPanel(dirPath); };
+    body.querySelector('.round-rollback').onclick = async () => {
+      const s = snaps[cur]; if (!s) return;
+      if (agentBusyIn(project)) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再恢复', true); return; }
+      if (!await confirmDialog(`把「${baseOf(project)}」整个恢复到 ${clock(s.ts)} 存档时的样子？之后的改动会被移除（当前状态已自动存档，可再滚回来）`)) return;
+      const r = await apiPost('/api/snapshot-restore', { path: project, hash: s.hash });
+      if (!r.ok) { toast(r.error || '恢复失败', true); return; }
+      close();
+      toast(`已恢复到 ${clock(s.ts)} · 恢复前的状态也存了一份`);
+      navigate(state.cwd);
+    };
+    body.querySelectorAll('.round-row').forEach((row) => {
+      const p = row.dataset.path;
+      const e = { path: p, name: baseOf(p), kind: kindFromName(p), isDir: false };
+      const stat = row.querySelector('.rr-stat');
+      // +/- 行数按需算：第一次悬停才去问，问过就记在行上
+      row.addEventListener('mouseenter', async () => {
+        if (stat.dataset.got || done.has(p)) return;
+        stat.dataset.got = '1'; stat.textContent = '…';
+        const r = await api(`/api/change-stat?path=${encodeURIComponent(p)}${snaps[cur] ? '&tag=' + snaps[cur].hash : ''}`).catch(() => null);
+        if (!r || !r.ok) { stat.textContent = '—'; return; }
+        if (r.binary) stat.textContent = '二进制';
+        else if (r.same) stat.textContent = '无差异';
+        else stat.innerHTML = `${r.isNew ? '<i class="rr-new">新</i> ' : ''}<span class="rr-add">+${r.add}</span> <span class="rr-del">−${r.del}</span>`;
+      }, { once: true });
+      row.querySelectorAll('[data-act]').forEach((b) => {
+        b.onclick = async (ev) => {
+          ev.stopPropagation();
+          if (b.dataset.act === 'diff') { close(); await navigate(dirOf(p)); applySelection(p); showDiff(state.entries.find((x) => x.path === p) || e); return; } // 目录里有真条目就用它，页脚的大小/时间才有数
+          if (agentBusyIn(project)) { toast('这个项目的 agent 正在干活，先等它停下（或按 Esc 打断）再还原', true); return; }
+          if (!await confirmDialog(`把「${e.name}」退回本回合开工前的版本？之后对它的改动会被移除（本回合新建的文件会移入废纸篓，可找回）`)) return;
+          b.disabled = true; b.textContent = '还原中…';
+          const r = await apiPost('/api/snapshot-restore-file', { file: p, tag: snaps[cur] ? snaps[cur].hash : undefined });
+          if (!r.ok) { toast(r.error || '还原失败', true); b.disabled = false; b.textContent = '还原此文件'; return; }
+          done.set(p, r.trashed ? '已移入废纸篓' : '已还原');
+          toast(r.trashed ? `「${e.name}」是本回合新建的，已移入废纸篓` : `「${e.name}」已还原`);
+          render();
+        };
+      });
+    });
+  };
+  render();
 }
 function perfNow() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
 // 从文件名粗判类型（变更项可能不在当前 entries 里）

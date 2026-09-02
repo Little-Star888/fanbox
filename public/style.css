@@ -705,6 +705,46 @@ kbd {
 .snap-latest { font-style: normal; font-size: 10px; font-family: var(--font-mono); padding: 1px 5px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); margin-left: 6px; }
 .snap-ago { flex: none; font-size: 11px; color: var(--text-faint); }
 .snap-restore { flex: none; font-size: 11px; padding: 3px 8px; }
+/* 本回合面板：回合选择 + 按终端分组的改动行 + 底部回放（沿用存档面板的对话框骨架） */
+.input-dialog.round-dialog { width: 780px; max-width: 96vw; } /* 叠一层 .input-dialog：通用对话框的 420px 排在后面，单靠 .round-dialog 压不过 */
+.round-title { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.round-title .ghost-btn { font-size: 11px; font-weight: 400; }
+.round-top { display: flex; align-items: center; gap: 8px; padding: 2px 6px 10px; border-bottom: 1px solid var(--border); margin-bottom: 4px; }
+.round-sel { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 5px 8px; font-size: 12px; font-family: var(--font-ui); }
+.round-sel-none { border-style: dashed; color: var(--text-faint); }
+.round-group { font-size: 11px; font-weight: 600; color: var(--text-faint); padding: 10px 6px 3px; }
+.round-row { display: flex; align-items: center; gap: 8px; padding: 6px; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.round-row:last-of-type { border-bottom: none; }
+.round-row .rr-ic { flex: none; display: inline-flex; color: var(--text-dim); }
+.round-row .rr-path { flex: 1; min-width: 0; font-family: var(--font-mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.round-row .rr-n { color: var(--accent); font-style: normal; font-size: 11px; }
+.round-row .rr-stat { flex: none; min-width: 72px; text-align: right; font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.round-row .rr-add { color: #3f9e5a; }
+.round-row .rr-del { color: #d05a4e; }
+.round-row .rr-new { font-style: normal; font-size: 10px; padding: 0 4px; border-radius: 3px; background: var(--accent-soft); color: var(--accent); }
+.round-row .rr-time { flex: none; font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.round-row.rr-done .rr-path { text-decoration: line-through; opacity: 0.55; }
+.round-empty { padding: 16px 6px; font-size: 12.5px; color: var(--text-dim); text-align: center; line-height: 1.7; }
+.round-replay { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.round-replay-head { font-size: 11px; font-weight: 600; color: var(--text-faint); padding: 0 6px 8px; }
+.round-replay .sreplay-list { width: auto; border-right: 0; } /* 终端录像播放器的 .replay-list 是固定宽侧栏，嵌进面板要铺满 */
+/* 改动视图的工具条：预览栏被终端挤窄时按钮换行，字不竖着断 */
+.editor-bar.diff-bar { flex-wrap: wrap; row-gap: 6px; }
+.editor-bar.diff-bar button { white-space: nowrap; flex: none; }
+/* md 改动的读者视图：旧版 / 当前 两栏渲染后对比 */
+.diff-reader { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.diff-col { min-width: 0; }
+.diff-col-head { font-size: 11px; color: var(--text-faint); padding: 0 4px 6px; }
+.diff-read { padding: 16px 18px; }
+/* 图片前后对比：两张图同格叠放，上层按滑杆裁切 */
+.imgdiff { display: flex; flex-direction: column; gap: 10px; }
+.imgdiff-stage { position: relative; display: grid; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.imgdiff-stage img { grid-area: 1 / 1; display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; }
+.imgdiff-bar { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); transform: translateX(-1px); pointer-events: none; box-shadow: 0 0 6px rgba(0, 0, 0, 0.4); }
+.imgdiff-tag { position: absolute; top: 8px; font-size: 11px; line-height: 1.4; padding: 2px 7px; border-radius: 4px; background: rgba(0, 0, 0, 0.55); color: #fff; pointer-events: none; }
+.imgdiff-tag-old { left: 8px; }
+.imgdiff-tag-new { right: 8px; }
+.imgdiff-range { width: 100%; accent-color: var(--accent); }
 
 /* 磁盘占用透视 */
 .disk-dialog { width: 540px; max-width: 92vw; }
