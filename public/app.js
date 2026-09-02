@@ -191,6 +191,7 @@ const state = {
   sort: localStorage.getItem('fb_sort') || 'name',
   showHidden: localStorage.getItem('fb_hidden') === '1',
   filter: '', selected: null, cursor: -1, cols: 1, visible: [],
+  showAllFiles: false, // 大目录「显示全部」点过没有；换目录就归零
   favorites: [], recentOpened: [], recentMode: false, skillsMode: false,
   previewW: Number(localStorage.getItem('fb_preview_w')) || 0, // 0 = 用户还没拖过，走 1:2 比例默认
   previewH: Number(localStorage.getItem('fb_preview_h')) || 0,
@@ -209,7 +210,7 @@ function fmtSize(n) {
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${u[i]}`;
 }
-// 秒 → 人话时长（录像列表用）：93→「1分33秒」、5400→「1小时30分」、20→「20秒」
+// 秒 → 人话时长（录像列表、会话回放共用；只有这一个 fmtDur，调用方传秒）：93→「1分33秒」、5400→「1小时30分」、20→「20秒」
 function fmtDur(sec) {
   sec = Math.round(sec || 0);
   if (sec < 60) return sec + '秒';
@@ -285,6 +286,7 @@ async function navigate(p, pushHistory = true) {
     state.recentMode = false;
     state.skillsMode = false;
     state.cursor = -1;
+    state.showAllFiles = false;
     localStorage.setItem('fb_last_cwd', state.cwd); // 下次启动回到这里
     render();
     renderRootsActive();
@@ -371,11 +373,15 @@ function renderStatusbar() {
   $('#sb-mem').onclick = () => memoryPanel(state.cwd);
   $('#sb-snap').onclick = () => snapshotPanel(state.cwd);
 }
+// 大目录分页：超过这个数只先铺前一页，底部给「显示全部」——几千张卡一次性建 DOM 要好几秒，
+// 而且多数时候用户只是路过这个目录
+const FILE_PAGE = 1500;
 function renderFiles() {
   if (state.skillsMode) return; // skills 视图自管 #file-area，文件渲染不要清掉它
   const area = $('#file-area');
   const list = visibleEntries();
-  state.visible = list;
+  const shown = (state.showAllFiles || list.length <= FILE_PAGE) ? list : list.slice(0, FILE_PAGE);
+  state.visible = shown;
   renderStatusbar();
   if (!list.length) {
     const emptyMsg = state.recentMode ? '没找到最近修改的文件' : '这个文件夹是空的';
@@ -384,29 +390,78 @@ function renderFiles() {
     return;
   }
   // 最近修改是跨目录平铺列表，强制列表视图并显示来源目录
-  if (state.recentMode || state.view === 'list') {
-    const wrap = document.createElement('div');
-    wrap.className = 'list';
-    const head = document.createElement('div');
-    head.className = 'row list-head';
-    head.innerHTML = `<div></div><div>名称</div><div>修改时间</div><div>大小</div><div></div>`;
-    wrap.appendChild(head);
-    list.forEach((e, i) => wrap.appendChild(listRow(e, i)));
+  const listMode = state.recentMode || state.view === 'list';
+  const cls = listMode ? 'list' : 'grid size-' + state.gridSize;
+  // 增量渲染：容器还是同一种视图就按 path 做 keyed diff，只增删移动有变化的卡片，
+  // 没变的连 DOM 节点一起留着——缩略图不重新解码、正在弹跳的发光动画不被打断。
+  // 从前每次 innerHTML 全量重建，agent 干活时 fs 刷新 + 热度 sweep 一秒能把整目录重建四次
+  let box = area.firstElementChild;
+  if (!box || box.className !== cls) {
+    box = document.createElement('div');
+    box.className = cls;
+    if (listMode) {
+      const head = document.createElement('div');
+      head.className = 'row list-head';
+      head.innerHTML = `<div></div><div>名称</div><div>修改时间</div><div>大小</div><div></div>`;
+      box.appendChild(head);
+    }
     area.innerHTML = '';
-    area.appendChild(wrap);
-    if (state.recentMode && state.recentTruncated) area.insertAdjacentHTML('beforeend', truncNote());
-    state.cols = 1;
-    highlightCursor();
-    return;
+    area.appendChild(box);
   }
-  // 至此只剩网格视图（列表/最近已在上面提前返回）
-  const grid = document.createElement('div');
-  grid.className = 'grid size-' + state.gridSize;
-  list.forEach((e, i) => grid.appendChild(gridItem(e, i)));
-  area.innerHTML = '';
-  area.appendChild(grid);
-  measureCols();
+  const make = listMode ? listRow : gridItem;
+  const old = new Map();
+  for (const el of box.children) if (el.dataset.path) old.set(el.dataset.path, el);
+  let cur = listMode ? box.children[1] : box.firstElementChild; // 列表模式第 0 个是表头
+  shown.forEach((e, i) => {
+    const sig = itemSig(e);
+    let el = old.get(e.path);
+    if (el && el.dataset.sig === sig) { old.delete(e.path); decorateItem(el, e, i); }
+    else el = make(e, i); // 新条目，或名字/mtime/大小变了的条目：整张重建（旧节点留在 old 里，最后统一摘掉）
+    if (el === cur) cur = cur.nextElementSibling;
+    else box.insertBefore(el, cur);
+  });
+  for (const el of old.values()) el.remove();
+  while (box.nextSibling) box.nextSibling.remove(); // 容器后面只放提示条，每次重铺
+  if (state.recentMode && state.recentTruncated) area.insertAdjacentHTML('beforeend', truncNote());
+  if (shown.length < list.length) {
+    const n = document.createElement('div');
+    n.className = 'more-note';
+    n.innerHTML = `<span>已显示 ${shown.length} / ${list.length} 项</span> · <a class="more-all">显示全部</a>`;
+    n.querySelector('.more-all').onclick = () => { state.showAllFiles = true; renderFiles(); };
+    area.appendChild(n);
+  }
+  if (listMode) state.cols = 1; else measureCols();
   highlightCursor();
+}
+// 卡片的「静态指纹」：这些字段有一个变了就整张重建（缩略图 URL 带 mtime 版本号，改过的图才会换新）；
+// 都没变就复用节点，只由 decorateItem 刷选中/热度这类动态状态
+function itemSig(e) {
+  return [e.name, e.kind, e.isDir ? 1 : 0, e.hidden ? 1 : 0, e.mtime, e.size, e.project || '', isFav(e.path) ? 1 : 0, state.recentMode ? 1 : 0].join('|');
+}
+// 只切 class / 属性，不动 innerHTML：序号、选中态、agent 刚改过的热度发光
+function decorateItem(el, e, i) {
+  el.dataset.idx = i;
+  el.classList.toggle('selected', state.selected === e.path);
+  const chg = state.changed && state.changed.get(e.name);
+  if (chg) {
+    el.classList.add('changed');
+    el.dataset.changed = chg.count > 1 ? '改·' + chg.count : '改';
+    el.style.setProperty('--heat', Math.min(1, 0.4 + chg.count * 0.12).toFixed(2));
+    if (chg.files.size) el.title = '刚变更：\n' + [...chg.files].join('\n');
+  } else if (el.classList.contains('changed')) {
+    el.classList.remove('changed', 'live-edit');
+    delete el.dataset.changed;
+    el.style.removeProperty('--heat');
+    el.removeAttribute('title');
+  }
+}
+// 热度 sweep 每秒调这个：只给到期的卡片熄灯，不重铺目录
+function refreshHeat() {
+  const area = $('#file-area'); if (!area || state.skillsMode) return;
+  area.querySelectorAll('[data-path]').forEach((el) => {
+    const i = Number(el.dataset.idx); const e = state.visible[i];
+    if (e && e.path === el.dataset.path) decorateItem(el, e, i);
+  });
 }
 function measureCols() {
   const items = $('#file-area').querySelectorAll('.item');
@@ -468,22 +523,19 @@ function projBadge(e) {
 }
 function gridItem(e, i) {
   const el = document.createElement('div');
-  const chg = state.changed && state.changed.get(e.name);
-  el.className = 'item' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chg ? ' changed' : '');
-  el.dataset.idx = i;
+  el.className = 'item' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '');
   el.dataset.path = e.path;
-  if (chg) { el.dataset.changed = chg.count > 1 ? '改·' + chg.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chg.count * 0.12).toFixed(2)); if (chg.files.size) el.title = '刚变更：\n' + [...chg.files].join('\n'); }
+  el.dataset.sig = itemSig(e);
   el.innerHTML = `<div class="icon" style="--tint:${iconColorFor(e)}">${thumbHtml(e)}${projBadge(e)}</div><div class="fname">${escapeHtml(e.name)}</div>${favBtn(e)}`;
   bindItem(el, e);
+  decorateItem(el, e, i);
   return el;
 }
 function listRow(e, i) {
   const el = document.createElement('div');
-  const chgR = state.changed && state.changed.get(e.name);
-  el.className = 'row' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '') + (state.selected === e.path ? ' selected' : '') + (chgR ? ' changed' : '');
-  el.dataset.idx = i;
+  el.className = 'row' + (e.isDir ? ' is-dir' : ' is-file') + (e.hidden ? ' hidden-file' : '');
   el.dataset.path = e.path;
-  if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chgR.count * 0.12).toFixed(2)); if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
+  el.dataset.sig = itemSig(e);
   // 最近修改是跨目录列表，名称后缀显示来源目录，方便区分同名文件
   const dirHint = state.recentMode ? ` <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>` : '';
   el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="${thumbUrl(e.path, 96, e.mtime)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
@@ -492,6 +544,7 @@ function listRow(e, i) {
     <div class="meta">${e.isDir ? '' : fmtSize(e.size)}</div>
     ${favBtn(e)}`;
   bindItem(el, e);
+  decorateItem(el, e, i);
   return el;
 }
 function bindItem(el, e) {
@@ -3454,7 +3507,9 @@ const term = {
     $('#terminal-resizer').classList.remove('hidden');
     this.applyDock();
     $('#btn-terminal').classList.add('active');
-    for (const t of (saved.tabs || []).slice(0, 8)) await this.newTab(t.cwd || undefined);
+    // 并行 spawn：newTab 在第一个 await 前就把 session 压进数组，按调用顺序排——标签顺序不变，
+    // 而 8 个 pty 的启动从串行 8 次往返变成一轮
+    await Promise.all((saved.tabs || []).slice(0, 8).map((t) => this.newTab(t.cwd || undefined)));
     const want = this.sessions[saved.active];
     if (want) this.activate(want.id);
     if (!this.sessions.length) this.newTab(); // 快照坏了也保证有一个标签
@@ -3541,7 +3596,13 @@ const term = {
     if (this.sessions.length) {
       if ($('#terminal-panel').classList.contains('hidden')) this.open();
       const cur = this.sessions.find((x) => x.id === this.active);
-      if (cur && !cur.dead && await this.isPlainShell(cur)) sess = cur;
+      // 裸 shell 也得站在当前浏览目录里才能复用：浏览到项目 B 点 Claude，不能让它在项目 A 的 shell 里启动。
+      // 先强制校准一次 cwd（平时 4 秒节流，用户可能刚 cd 过），拿不到就按 startDir 算
+      if (cur && !cur.dead) {
+        await this.refreshCwd(cur, true).catch(() => {});
+        const norm = (p) => String(p || '').replace(/\/+$/, '');
+        if (norm(cur.cwd || cur.startDir) === norm(state.cwd) && await this.isPlainShell(cur)) sess = cur;
+      }
     }
     if (!sess) sess = await this.openInDir(state.cwd); // 等 spawn 完，拿确切 session 写入
     if (sess && !sess.dead) { this.input(sess.id, cmd + '\r'); sess.xterm.focus(); toast('已在终端启动 ' + cmd); }
@@ -4639,26 +4700,28 @@ function toggleChangesPanel() {
   }, 0);
 }
 // WOW2 会话回放：像刷视频一样拖时间轴，重现这段时间 agent 一步步改了哪些文件
+// 类名/ID 全部带 sreplay- 前缀：和终端录像的 .replay-panel/.replay-list 同名会被后者的
+// 1180×800 + 240px 左栏样式盖掉，#replay-list 还会撞上 index.html 里的同 id
 function openReplay() {
   const tl = state.changeTimeline.slice();
   if (tl.length < 2) { toast('变更太少，先让 agent 多改几下再回放', true); return; }
   const t0 = tl[0].ts, t1 = tl[tl.length - 1].ts;
   const span = Math.max(1000, t1 - t0);
   const ov = document.createElement('div');
-  ov.className = 'replay-ov';
+  ov.className = 'sreplay-ov';
   ov.innerHTML =
-    `<div class="replay-panel">
-      <div class="replay-head"><span>会话回放 · ${tl.length} 次写入 · 跨 ${fmtDur(span)}</span><button class="replay-close ghost-btn">关闭 (Esc)</button></div>
-      <div class="replay-now"><span class="rn-label">此刻 agent 正在改</span><span class="rn-file" id="replay-now">—</span></div>
-      <div class="replay-track" id="replay-track"><div class="replay-fill" id="replay-fill"></div><div class="replay-playhead" id="replay-playhead"></div></div>
-      <div class="replay-ctl"><button id="replay-play" class="primary">▶ 播放</button><input type="range" id="replay-range" min="0" max="1000" value="1000"><span id="replay-count" class="replay-count"></span></div>
-      <div class="replay-list" id="replay-list"></div>
+    `<div class="sreplay-panel">
+      <div class="sreplay-head"><span>会话回放 · ${tl.length} 次写入 · 跨 ${fmtDur(span / 1000)}</span><button class="sreplay-close ghost-btn">关闭 (Esc)</button></div>
+      <div class="sreplay-now"><span class="rn-label">此刻 agent 正在改</span><span class="rn-file" id="sreplay-now">—</span></div>
+      <div class="sreplay-track" id="sreplay-track"><div class="sreplay-fill" id="sreplay-fill"></div><div class="sreplay-playhead" id="sreplay-playhead"></div></div>
+      <div class="sreplay-ctl"><button id="sreplay-play" class="primary">▶ 播放</button><input type="range" id="sreplay-range" min="0" max="1000" value="1000"><span id="sreplay-count" class="sreplay-count"></span></div>
+      <div class="sreplay-list" id="sreplay-list"></div>
     </div>`;
   document.body.appendChild(ov);
-  const track = ov.querySelector('#replay-track');
-  tl.forEach((e) => { const t = document.createElement('i'); t.className = 'replay-tick'; t.style.left = ((e.ts - t0) / span * 100) + '%'; track.appendChild(t); });
-  const range = ov.querySelector('#replay-range');
-  const playBtn = ov.querySelector('#replay-play');
+  const track = ov.querySelector('#sreplay-track');
+  tl.forEach((e) => { const t = document.createElement('i'); t.className = 'sreplay-tick'; t.style.left = ((e.ts - t0) / span * 100) + '%'; track.appendChild(t); });
+  const range = ov.querySelector('#sreplay-range');
+  const playBtn = ov.querySelector('#sreplay-play');
   let raf = null, playing = false, startWall = 0, startFrac = 0;
   const DURATION = Math.min(20000, Math.max(6000, span / 3)); // 把真实时长压缩到 6–20 秒
   const render = (frac) => {
@@ -4666,12 +4729,12 @@ function openReplay() {
     let lastIdx = -1;
     for (let i = 0; i < tl.length; i++) { if (tl[i].ts <= at) lastIdx = i; else break; }
     const done = lastIdx + 1;
-    ov.querySelector('#replay-fill').style.width = (frac * 100) + '%';
-    ov.querySelector('#replay-playhead').style.left = (frac * 100) + '%';
-    ov.querySelector('#replay-now').textContent = lastIdx >= 0 ? tl[lastIdx].name : '—';
-    ov.querySelector('#replay-count').textContent = `${done}/${tl.length}`;
+    ov.querySelector('#sreplay-fill').style.width = (frac * 100) + '%';
+    ov.querySelector('#sreplay-playhead').style.left = (frac * 100) + '%';
+    ov.querySelector('#sreplay-now').textContent = lastIdx >= 0 ? tl[lastIdx].name : '—';
+    ov.querySelector('#sreplay-count').textContent = `${done}/${tl.length}`;
     const recent = tl.slice(Math.max(0, lastIdx - 5), lastIdx + 1).reverse();
-    ov.querySelector('#replay-list').innerHTML = recent.map((e, i) => `<div class="rl-row${i === 0 ? ' rl-now' : ''}"><span>${escapeHtml(e.name)}</span><span class="rl-t">${fmtClock(e.ts)}</span></div>`).join('');
+    ov.querySelector('#sreplay-list').innerHTML = recent.map((e, i) => `<div class="rl-row${i === 0 ? ' rl-now' : ''}"><span>${escapeHtml(e.name)}</span><span class="rl-t">${fmtClock(e.ts)}</span></div>`).join('');
   };
   const stop = () => { playing = false; if (raf) cancelAnimationFrame(raf); raf = null; playBtn.textContent = '▶ 播放'; };
   const step = () => {
@@ -4692,15 +4755,9 @@ function openReplay() {
   const close = () => { stop(); ov.remove(); document.removeEventListener('keydown', onKey); };
   const onKey = (e) => { if (e.key === 'Escape') { e.stopPropagation(); close(); } };
   document.addEventListener('keydown', onKey, true);
-  ov.querySelector('.replay-close').onclick = close;
+  ov.querySelector('.sreplay-close').onclick = close;
   ov.onclick = (e) => { if (e.target === ov) close(); };
   render(1); // 默认停在最终态
-}
-function fmtDur(ms) {
-  const s = Math.round(ms / 1000);
-  if (s < 60) return s + ' 秒';
-  const m = Math.round(s / 60);
-  return m < 60 ? m + ' 分钟' : (m / 60).toFixed(1) + ' 小时';
 }
 function perfNow() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
 // 从文件名粗判类型（变更项可能不在当前 entries 里）
@@ -5122,7 +5179,7 @@ if (window.fanboxFs) {
       const now = Date.now(); let dirty = false;
       for (const [k, v] of state.changed) { if (now - v.ts > 4500) { state.changed.delete(k); dirty = true; } }
       if (!state.changed.size) { clearInterval(sweep); sweep = null; }
-      if (dirty) renderFiles();
+      if (dirty) refreshHeat(); // 只熄灯，不重铺目录
     }, 1000); // 单一清理定时器，避免大批量变更时堆积成千上万个 timer
   };
   window.fanboxFs.onChanged(({ dir, filename }) => {
@@ -5586,17 +5643,17 @@ async function init() {
     else { img.dataset.fsStage = 'fs'; img.src = '/fs' + encodeURI(abs); }
   }, true);
   document.querySelectorAll('#theme-switch .theme-seg button').forEach((b) => { b.onclick = () => applyTheme(b.dataset.skin); });
-  await loadRoots();
-  await loadFavorites();
+  // 回到上次浏览的目录（目录已不存在则退回主目录）。roots / favorites / 文件列表三条请求并发发出，
+  // 文件列表最先落地——没有上次目录时传空路径，服务端按主目录处理，不必等 roots 回来拿 home
+  const lastDir = localStorage.getItem('fb_last_cwd');
+  await Promise.all([loadRoots(), loadFavorites(), navigate(lastDir || '', false)]);
+  if (!state.cwd) await navigate(state.home, false);
+  renderRootsActive(); // 列表可能比侧栏先到，这时侧栏还没东西可高亮，补一次
   powerBar.init();
   verInfo.init();
   cronPanel.syncBadge();
   loadAgentProjects();
   setInterval(loadAgentProjects, 120000); // agent 项目入口保持新鲜（服务端有 60s 缓存，开销很小）
-  // 回到上次浏览的目录（目录已不存在则退回主目录）
-  const lastDir = localStorage.getItem('fb_last_cwd');
-  await navigate(lastDir || state.home, false);
-  if (!state.cwd) await navigate(state.home, false);
   // 恢复上次终端开合与标签布局（几个标签、各在哪个目录、谁在前台；进程不复活）。
   // 首次安装没有任何记录 → 默认打开：侧栏 + 文件区 + 终端的三栏就是 FanBox 的本来形态
   if (term.available() && localStorage.getItem('fb_term_open') !== '0') {

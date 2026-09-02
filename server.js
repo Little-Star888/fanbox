@@ -137,10 +137,11 @@ function sendJSON(res, code, obj) {
 
 async function listDir(dirPath) {
   const dir = resolvePath(dirPath);
-  const dirents = await fsp.readdir(dir, { withFileTypes: true });
+  const dirents = (await fsp.readdir(dir, { withFileTypes: true })).filter((d) => d.name !== '.DS_Store');
   const entries = [];
-  for (const d of dirents) {
-    if (d.name === '.DS_Store') continue;
+  // lstat 从前逐个 await，5000 个文件就是 5000 次串行往返；改成 64 个一批并行——
+  // 批量封顶是为了别在超大目录里一口气开几千个 fd
+  const statOne = async (d) => {
     const full = path.join(dir, d.name);
     let isDir = d.isDirectory();
     let size = 0, mtime = 0;
@@ -149,7 +150,7 @@ async function listDir(dirPath) {
       try {
         const st = await fsp.stat(full);
         isDir = st.isDirectory();
-      } catch { continue; }
+      } catch { return null; }
     }
     let btime = 0;
     try {
@@ -158,7 +159,7 @@ async function listDir(dirPath) {
       mtime = st.mtimeMs;
       btime = st.birthtimeMs || 0;
     } catch { /* ignore */ }
-    entries.push({
+    return {
       name: d.name,
       path: full,
       isDir,
@@ -167,7 +168,11 @@ async function listDir(dirPath) {
       size,
       mtime,
       btime,
-    });
+    };
+  };
+  for (let i = 0; i < dirents.length; i += 64) {
+    const part = await Promise.all(dirents.slice(i, i + 64).map(statOne));
+    for (const e of part) if (e) entries.push(e);
   }
   // 文件夹在前，按名称排序
   entries.sort((a, b) => {
