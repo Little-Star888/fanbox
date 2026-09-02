@@ -127,6 +127,7 @@ window.FANBOX_DICT = {
 
   // ---------- 文件区 / 状态栏 ----------
   '这个文件夹是空的': 'This folder is empty',
+  '显示全部': 'Show all',
   '没找到最近修改的文件': 'No recently modified files',
   '发版': 'Release',
   '版本号→CHANGELOG→打包→push→Release 一条龙，在终端跑': 'Version bump → CHANGELOG → build → push → Release, end to end in the terminal',
@@ -499,7 +500,10 @@ window.FANBOX_DICT_RULES = [
   [/^(\d+) 分$/, (m) => `${m[1]}m`],
   [/^(\d+) 时$/, (m) => `${m[1]}h`],
   [/^(\d+) 天$/, (m) => `${m[1]}d`],
-  // 时长（fmtDur：会话回放）
+  // 大目录分页提示
+  [/^已显示 (\d+) \/ (\d+) 项$/, (m) => `Showing ${m[1]} / ${m[2]}`],
+  // 时长（fmtDur：录像列表 + 会话回放，「1小时30分」「1分33秒」「20秒」）
+  [/^(?=\d)(?:(\d+)小时)?(?:(\d+)分)?(?:(\d+)秒)?$/, (m) => [m[1] && `${m[1]}h`, m[2] && `${m[2]}m`, m[3] && `${m[3]}s`].filter(Boolean).join(' ')],
   [/^(\d+) 秒$/, (m) => `${m[1]} s`],
   [/^(\d+) 分钟$/, (m) => `${m[1]} min`],
   [/^([\d.]+) 小时$/, (m) => `${m[1]} hr`],
@@ -591,7 +595,7 @@ window.FANBOX_DICT_RULES = [
   // 变更收件箱 / 回放
   [/^本会话变更 · (\d+)$/, (m) => `Changes this session · ${m[1]}`],
   [/^会话回放 · (\d+) 次写入 · 跨 (.+)$/, (m) => {
-    const t = m[2].replace(/^(\d+) 秒$/, '$1 s').replace(/^(\d+) 分钟$/, '$1 min').replace(/^([\d.]+) 小时$/, '$1 hr');
+    const t = window.t ? window.t(m[2]) : m[2];
     return `Session replay · ${m[1]} writes · over ${t}`;
   }],
   // 更新提示

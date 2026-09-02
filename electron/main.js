@@ -1349,6 +1349,13 @@ async function flushWatch() {
   }));
   const out = keep.filter(Boolean);
   if (out.length && win && !win.isDestroyed()) win.webContents.send('fs:changed-batch', out);
+  // 被监听的目录自己被删/改名了：FSEvents 只会报几条事件，watcher 不会自己关，从前就永远留在表里
+  // （watch-set 见表里有就跳过，目录回来了也不会重新挂）。这里顺着这批事件的目录查一遍，没了就摘掉
+  for (const dir of new Set(batch.map((m) => m.dir))) {
+    if (fs.existsSync(dir)) continue;
+    const w = watchers.get(dir);
+    if (w) { try { w.close(); } catch { /* */ } watchers.delete(dir); }
+  }
 }
 function startWatch(dir) {
   if (watchers.has(dir) || !dir || !fs.existsSync(dir)) return;
@@ -1362,6 +1369,9 @@ function startWatch(dir) {
       watchPending.push({ dir, filename: name });
       if (!watchTimer) watchTimer = setTimeout(flushWatch, 100);
     });
+    // FSWatcher 是 EventEmitter：EMFILE（fd 用光）这类错误异步走 'error' 事件，没人听就是主进程未捕获异常，
+    // 整个 app 跟着崩。听到就把这只关掉、从表里摘除，下次 watch-set 会重试
+    w.on('error', () => { try { w.close(); } catch { /* */ } if (watchers.get(dir) === w) watchers.delete(dir); });
     watchers.set(dir, w);
   } catch { /* 无权限等，跳过该目录 */ }
 }
