@@ -26,6 +26,7 @@
 - **写类接口在桌面版要门票**：Origin 校验挡不住本机其他进程直接 curl——任何进程都能 `POST /api/cron/save` 塞一条 shell 任务再 run，或调 /api/trash、/api/write。现在桌面 app 里所有 POST 端点都要带 `x-fanbox-token`（与 /api/agent/* 同一把、每次启动随机生成、不落盘），只有渲染层主页面和翻箱自开终端里的 agent 拿得到；`node server.js` 浏览器模式维持原样
 - **畸形请求不再静默兜底到主目录**：从前请求体解析失败回 `{}`、`resolvePath(undefined)` 落到 HOME——实测一条畸形 JSON 打到 /api/trash，整个（假）HOME 被送进废纸篓。现在解析失败/非对象回 400、超 64MB 回 413，所有写类端点的路径参数缺失或非字符串直接 400
 ### Changed
+- **退出确认只拦正在干活的 agent**：从前只要有终端开着，⌘Q 就弹「还有 N 个终端会话在运行」，裸 shell 和停在提示符等输入的 claude 也一样拦，久了确认框就成了每次都要多点一下的噪音。现在和休眠守卫共用同一份判据：只有 agent 正在干活（或停在审批框半途）才拦，并列出是哪几个
 - **agent 状态改由官方 hooks 汇报，不再刮终端文本**：从前判「agent 在干活 / 轮到你 / 等你确认」全靠输出静默 2.5s + 扫末尾 25 行匹配英文文案，每 600ms 一轮，文案一变就漏响、误报；主进程另一套「前台进程不是裸 shell 就算忙」让 claude 空闲等输入时「合盖继续干活」也不放 Mac 睡。现在 FanBox 启动时把一份 hooks 配置写到 `~/.fanbox/hooks/`，一键启动 / 续会话 / 定时任务 / AI 整理拉起的 Claude Code 带 `--settings` 叠加它（不动用户自己的 `~/.claude/settings.json`），Codex 走 `-c notify=[…]`（用户原有的 notify 程序会被接力调用，不丢）；agent 开工、调工具、弹权限确认、回答完、会话结束都直接告诉 FanBox。标签圆点、「轮到你」呼吸、提示音、系统通知全部改吃这些事件，权限确认框弹出的瞬间就响；电源守卫只在 agent 真的在干活时才拦住休眠。用户自己在 shell 里手敲 `claude` 不带 hooks、或跑普通命令，一切照旧走原来的判定
 - **变更收件箱知道是谁改的**：hooks 报来的 Edit/Write 带文件路径，进收件箱时记下终端与 agent 归属；监听目录之外的改动（agent 改了别的项目）也进得来了
 - `/api/agent/terminals` 每个终端多两个字段：`hooked`（是否收到过官方事件）与 `state`（`working / needs_permission / needs_input / done`），`busy` 对 hooked 终端以 `state` 为准

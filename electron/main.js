@@ -432,16 +432,23 @@ let wechatConnected = false; // 微信 ClawBot 当前是否连着（bridge 回�
 
 // ---- agent 工作状态检测：前台不是裸 shell = 终端里有东西在跑（和微信 termControl 同一判据）----
 const BARE_SHELL = /^-?(zsh|bash|sh|fish|login)$/i;
-function termBusyAny() {
+// 正在干活的 agent 终端清单：休眠守卫与退出确认共用同一份判据，两边不会各说各话
+function activeAgentTerms() {
+  const out = [];
   for (const [id, p] of terminals) {
     // 有官方 hook 事实的终端只认它说的：claude 空闲等输入时前台进程仍是 claude，旧判据会一直「忙」不让 Mac 睡
     const f = termFacts.get(id);
-    if (f) { if (f.state === 'working') return true; continue; }
+    if (f) {
+      // 等审批也算干活中——任务在半途，杀掉就是半截；等输入/已完成的空闲 agent 不算
+      if (f.state === 'working' || f.state === 'needs_permission') out.push({ id, label: f.agent || (p && p.process) || id });
+      continue;
+    }
     const proc = (p && p.process) || '';
-    if (proc && !BARE_SHELL.test(proc)) return true;
+    if (proc && !BARE_SHELL.test(proc)) out.push({ id, label: proc });
   }
-  return false;
+  return out;
 }
+function termBusyAny() { return activeAgentTerms().length > 0; }
 // 收工不立刻放行休眠：agent 工具调用间隙 / 刚跑完下一句还没起，留 2 分钟缓冲防误判
 const IDLE_GRACE_MS = 2 * 60 * 1000;
 let lastBusyAt = 0;
@@ -676,15 +683,19 @@ app.on('activate', () => {
 let quitConfirmed = false;
 let isQuitting = false; // 真正退出（⌘Q / 菜单退出）才置真；点红叉只隐藏不退出，见 win.on('close')
 app.on('before-quit', (e) => {
-  if (quitConfirmed || terminals.size === 0) { isQuitting = true; return; }
+  // 只拦「agent 正在干活」的情况：开着的裸 shell、停在提示符等输入的 claude 都不算——
+  // 从前按「有没有终端开着」拦，每次退出都要多点一下，久了确认框就成了噪音
+  const active = quitConfirmed ? [] : activeAgentTerms();
+  if (active.length === 0) { isQuitting = true; return; }
   e.preventDefault();
+  const names = active.map((a) => a.label).join('、');
   const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
     type: 'warning',
     buttons: [M('取消', 'Cancel'), M('退出', 'Quit')],
     defaultId: 0,
     cancelId: 0,
-    message: M(`还有 ${terminals.size} 个终端会话在运行`, `${terminals.size} terminal session(s) still running`),
-    detail: M('退出会终止正在运行的 agent 任务，确定退出？', 'Quitting will terminate running agent tasks. Quit anyway?'),
+    message: M(`还有 ${active.length} 个 agent 正在干活`, `${active.length} agent(s) still working`),
+    detail: M(`${names}\n\n退出会终止这些任务，确定退出？`, `${names}\n\nQuitting will terminate these tasks. Quit anyway?`),
   });
   if (choice === 1) { quitConfirmed = true; isQuitting = true; app.quit(); }
 });
