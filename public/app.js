@@ -3,7 +3,28 @@
 
 const $ = (s) => document.querySelector(s);
 const api = (p) => fetch(p).then((r) => r.json());
-const apiPost = (p, body) => fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+// 写类接口的门票：Electron 主进程生成、经 preload 只交给主页面（预览 iframe 跨源拿不到）；浏览器模式没有，服务端也就不查
+const CTL_TOKEN = (window.fanboxEnv && window.fanboxEnv.ctlToken) || '';
+const apiPost = (p, body) => fetch(p, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-fanbox-token': CTL_TOKEN }, body: JSON.stringify(body) }).then((r) => r.json());
+
+// index.html 从前靠 <script onerror> 标记缺失的 vendor；CSP 禁了内联事件处理器，改在这里按全局对象判定
+if (!window.marked) window.__noMarked = 1;
+if (!window.hljs) window.__noHljs = 1;
+if (!window.Terminal || !window.FitAddon) window.__noXterm = 1;
+if (!window.WebglAddon) window.__noWebgl = 1;
+if (!window.Unicode11Addon) window.__noUnicode11 = 1;
+if (!window.ClipboardAddon) window.__noClipboard = 1;
+
+// ---------- md → HTML 的唯一入口 ----------
+// md 是 agent 和外部世界写进来的：<img onerror>、<script> 一旦经 innerHTML 落进主页面，就跑在握着 fanboxPty（= 一个 shell）
+// 的上下文里。所以 marked 的输出必须先过 DOMPurify。任务清单的 <input type=checkbox disabled checked>、<details>/<summary>、
+// <img width>、表格、代码块的 language-* class、data-* 都在 DOMPurify 默认白名单里，只补它默认不给的 target（手写 <a target=_blank> 常见）。
+const MD_PURIFY = { ADD_ATTR: ['target'] };
+function mdHtml(md, opts) {
+  const src = String(md || '');
+  if (!window.marked || window.__noMarked || !window.DOMPurify) return escapeHtml(src); // 缺任一环都退回纯文本，绝不裸放 HTML
+  return window.DOMPurify.sanitize(window.marked.parse(src, opts), MD_PURIFY);
+}
 
 // ---------- SVG 图标系统（替代 emoji，统一矢量审美） ----------
 const SVG = {
@@ -443,13 +464,30 @@ function displayImgWidth() {
   const css = (host && host.clientWidth) || 900;
   return Math.min(1600, Math.max(480, Math.round(css * (window.devicePixelRatio || 1))));
 }
+// CSP（script-src 'self'）不跑内联 onerror/onclick：缩略图加载失败的回退和微信图片点击改为文档级委托。
+// error 事件不冒泡，用捕获阶段接。
+document.addEventListener('error', (ev) => {
+  const im = ev.target;
+  if (!(im instanceof HTMLImageElement)) return;
+  if (im.classList.contains('thumb')) {
+    const wrap = im.closest('.thumb-wrap');
+    if (wrap) wrap.replaceWith(Object.assign(document.createElement('span'), { className: 'svg-icon', innerHTML: im.dataset.fbk === 'video' ? window.__svgVideo : window.__svgImg }));
+  } else if (im.classList.contains('thumb-sm')) {
+    im.replaceWith(Object.assign(document.createElement('span'), { className: 'svg-icon', innerHTML: im.dataset.fb || '' }));
+  } else if (im.classList.contains('pv-img') && im.dataset.fallback) {
+    const fb = im.dataset.fallback; delete im.dataset.fallback; im.src = fb; // 只退一次，防止回退图也失败时无限循环
+  }
+}, true);
+document.addEventListener('click', (ev) => {
+  const im = ev.target && ev.target.closest && ev.target.closest('.wx-img');
+  if (im) lightbox(im.dataset.path);
+});
 function thumbHtml(e) {
   // 关键性能修复：用缩略图端点（sips/qlmanage 缓存小图），不再把原图/原视频整文件拉进来解码
   if (e.kind === 'image' || e.kind === 'video') {
     const w = state.gridSize === 'lg' ? 320 : (state.gridSize === 'sm' ? 160 : 240);
-    const fb = e.kind === 'video' ? 'window.__svgVideo' : 'window.__svgImg';
-    // 照片按原比例呈现（object-fit:contain）+ 柔和投影，像散落的照片；缩略图失败回退强色字形
-    const img = `<img class="thumb" loading="lazy" decoding="async" src="${thumbUrl(e.path, w, e.mtime)}" alt="" onerror="this.closest('.thumb-wrap').replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:${fb}}))">`;
+    // 照片按原比例呈现（object-fit:contain）+ 柔和投影，像散落的照片；缩略图失败回退强色字形（见上方 error 委托）
+    const img = `<img class="thumb" loading="lazy" decoding="async" src="${thumbUrl(e.path, w, e.mtime)}" alt="" data-fbk="${e.kind}">`;
     const play = e.kind === 'video' ? '<span class="play-badge"><svg viewBox="0 0 24 24" width="40%" height="40%"><path d="M8 5.5l11 6.5-11 6.5z" fill="#fff"/></svg></span>' : '';
     return `<span class="thumb-wrap${e.kind === 'video' ? ' is-video' : ''}">${img}${play}</span>`;
   }
@@ -486,7 +524,7 @@ function listRow(e, i) {
   if (chgR) { el.dataset.changed = chgR.count > 1 ? '改·' + chgR.count : '改'; el.style.setProperty('--heat', Math.min(1, 0.4 + chgR.count * 0.12).toFixed(2)); if (chgR.files.size) el.title = '刚变更：\n' + [...chgR.files].join('\n'); }
   // 最近修改是跨目录列表，名称后缀显示来源目录，方便区分同名文件
   const dirHint = state.recentMode ? ` <span class="row-dir">· ${escapeHtml(tilde(e.dir || dirOf(e.path)))}</span>` : '';
-  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="${thumbUrl(e.path, 96, e.mtime)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'svg-icon',innerHTML:this.dataset.fb||''}))" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
+  el.innerHTML = `<div class="icon">${(e.kind === 'image' || e.kind === 'video') ? `<img class="thumb-sm" loading="lazy" decoding="async" src="${thumbUrl(e.path, 96, e.mtime)}" data-fb='${escapeHtml(iconSvg(e, 18))}'>` : `<span class="svg-icon">${iconSvg(e, 18)}</span>`}</div>
     <div class="fname">${escapeHtml(e.name)}${projBadge(e)}${dirHint}</div>
     <div class="meta">${fmtTime(e.mtime)}</div>
     <div class="meta">${e.isDir ? '' : fmtSize(e.size)}</div>
@@ -626,7 +664,7 @@ async function openPreview(e) {
     const exi = (e.name.split('.').pop() || '').toLowerCase();
     const nativeImg = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(exi);
     const fallback = nativeImg ? `/api/raw?path=${encodeURIComponent(e.path)}&v=${e.mtime || 0}` : `/api/thumb?path=${encodeURIComponent(e.path)}&w=1600&v=${e.mtime || 0}`;
-    body.innerHTML = `<img class="pv-img" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=1000&v=${e.mtime || 0}" title="点击放大" onerror="this.onerror=null;this.src='${fallback}'">`;
+    body.innerHTML = `<img class="pv-img" src="/api/thumb?path=${encodeURIComponent(e.path)}&w=1000&v=${e.mtime || 0}" title="点击放大" data-fallback="${fallback}">`;
     body.querySelector('.pv-img').onclick = () => lightbox(e.path, nativeImg, e.mtime);
   } else if (k === 'video') {
     body.innerHTML = `<video controls src="/api/raw?path=${encodeURIComponent(e.path)}"></video>`;
@@ -682,7 +720,7 @@ function renderTextPreview(data) {
 function mdReadBody(md, srcPath) {
   const div = document.createElement('div');
   div.className = 'md-body';
-  div.innerHTML = window.marked ? window.marked.parse(md || '') : escapeHtml(md || '');
+  div.innerHTML = mdHtml(md);
   fixLocalImages(div, srcPath, displayImgWidth()); // 三个调用点都是「给人看」，一律走缩略图；导出走 typeset 那条，不经这里
   if (window.hljs && !window.__noHljs) div.querySelectorAll('pre code').forEach((b) => { try { window.hljs.highlightElement(b); } catch { /* */ } });
   return div;
@@ -743,7 +781,7 @@ function renderHtmlPreview(data, meta) {
   // 头部不再放 meta/「查看源码」/「浏览器打开」：顶栏的编辑（笔）= 看源码、打开 = 浏览器打开，已经够了
   body.innerHTML =
     `<div class="html-preview-host">
-      <div class="iframe-wrap"><iframe class="iframe-preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals" scrolling="yes" src="${fsUrl(data.path, data.mtime)}"></iframe></div>
+      <div class="iframe-wrap"><iframe class="iframe-preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals" scrolling="yes" src="${fsUrl(data.path, data.mtime)}"></iframe></div>
     </div>`;
   // 桌面 Chromium 的 iframe 不认 viewport meta，定宽桌面页在窄预览框里只露左上角。
   // /fs/ 注入的测宽脚本会把页面自然宽度 postMessage 过来：超出容器就整页等比缩到适配宽度。
@@ -1430,7 +1468,7 @@ async function mdEditor(e, data, mode = 'rich') {
   // marked 不可用时退回严格比对（保守禁掉富文本，绝不误放行有损）。
   const semanticSig = (md) => {
     const d = document.createElement('div');
-    d.innerHTML = window.marked.parse(md || '');
+    d.innerHTML = mdHtml(md); // 离屏 div 一样会加载 <img> 并触发 onerror，同样得过净化
     const text = (d.textContent || '').replace(/\s+/g, ' ').trim();
     const bones = [];
     d.querySelectorAll('*').forEach((el) => {
@@ -2634,13 +2672,13 @@ const wechatView = {
     const text = me ? escapeHtml(m.text) : this.mdBody(m.text);
     // 用户发来的图片：用 /api/raw 直接读本机收件箱里的原图，点击走全局 lightbox 放大
     const imgs = (m.images || []).map((p) =>
-      `<img class="wx-img" src="/api/raw?path=${encodeURIComponent(p)}" loading="lazy" alt="图片" onclick="lightbox(this.dataset.path)" data-path="${escapeHtml(p)}">`
+      `<img class="wx-img" src="/api/raw?path=${encodeURIComponent(p)}" loading="lazy" alt="图片" data-path="${escapeHtml(p)}">`
     ).join('');
     const body = imgs ? imgs + (m.text ? `<div class="wx-cap">${text}</div>` : '') : text;
     return `<div class="wx-row ${me ? 'me' : 'bot'}"><div class="wx-av ${me ? 'me' : 'bot'}">${av}</div><div class="wx-bub${me ? '' : ' md'}">${body}</div></div>`;
   },
   mdBody(text) {
-    try { if (window.marked && !window.__noMarked) return window.marked.parse(String(text || ''), { breaks: true, gfm: true }); } catch { /* 退回纯文本 */ }
+    try { if (window.marked && !window.__noMarked) return mdHtml(text, { breaks: true, gfm: true }); } catch { /* 退回纯文本 */ }
     return escapeHtml(text).replace(/\n/g, '<br>');
   },
   connectPhone() {
@@ -5047,14 +5085,14 @@ function liveHtml(e, first) {
   const body = $('#preview-body');
   let wrap = body.querySelector('.follow-html');
   if (first || !wrap) {
-    body.innerHTML = `<div class="follow-html"><iframe class="iframe-preview" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals" src="${fsUrl(e.path, Date.now())}"></iframe></div>`;
+    body.innerHTML = `<div class="follow-html"><iframe class="iframe-preview" sandbox="allow-scripts allow-same-origin allow-forms allow-modals" src="${fsUrl(e.path, Date.now())}"></iframe></div>`;
     return;
   }
   if (follow.swapping) { follow.swapDirty = true; return; } // 正在换页，攒一次换完补刷
   follow.swapping = true;
   const next = document.createElement('iframe');
   next.className = 'iframe-preview follow-next';
-  next.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals'); // 与常规 html 预览同口径：经隔离端口给 same-origin（跨源于 App，接管不了）
+  next.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms allow-modals'); // 与常规 html 预览同口径：经隔离端口给 same-origin（跨源于 App，接管不了）
   let swapped = false;
   const swap = () => {
     if (swapped) return;
@@ -5300,7 +5338,7 @@ const verInfo = {
       .replace(/^### Removed$/gm, '### 移除')
       .replace(/^### Deprecated$/gm, '### 弃用')
       .replace(/^### Security$/gm, '### 安全');
-    return window.marked ? window.marked.parse(zh) : '<pre>' + escapeHtml(zh) + '</pre>';
+    return window.marked ? mdHtml(zh) : '<pre>' + escapeHtml(zh) + '</pre>';
   },
   tipHtml() {
     const e = (this.data.entries || []).find((x) => x.version !== 'Unreleased' && x.body);
