@@ -1140,17 +1140,19 @@ const SNAP_EXCLUDE = [
 ].join('\n') + '\n';
 const snapThrottle = new Map(); // project → 上次尝试 ms（15s 内不重复扫）
 const snapDead = new Set();     // 本次运行内放弃的目录（太大/超时），别每轮都撞一次
+let snapUsageCache = null;      // { at, data }：du 一遍二十几 GB 要好几秒，60 秒内复用
 // 符号链接归一化：/tmp → /private/tmp 这类别名会让 cwd 和 HOME 字符串对不上、绕过资格守卫
 const snapReal = (p) => { try { return fs.realpathSync(p); } catch { return p; } };
 
 function snapGitDir(project) {
   return path.join(SNAP_ROOT, crypto.createHash('sha1').update(project).digest('hex').slice(0, 16));
 }
+// project 传 null = 只碰裸仓库不挂工作区（项目目录可能已经不在了，cwd 落到快照根目录）
 function execSnap(gitDir, project, args, timeout = 10000) {
   return new Promise((resolve) => {
-    execFile('git', ['--git-dir', gitDir, '--work-tree', project, ...args],
-      { cwd: project, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
-        resolve({ ok: !err, killed: !!(err && err.killed), stdout: stdout || '', stderr: stderr || '' });
+    execFile('git', ['--git-dir', gitDir, ...(project ? ['--work-tree', project] : []), ...args],
+      { cwd: project || SNAP_ROOT, timeout, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+        resolve({ ok: !err, killed: !!(err && err.killed), code: err ? err.code : 0, stdout: stdout || '', stderr: stderr || '' });
       });
   });
 }
@@ -1172,8 +1174,28 @@ function snapEligible(project) {
   } else if (p.split(path.sep).filter(Boolean).length < 2) return false; // / 下一层（/tmp 等）不收
   try { return fs.statSync(p).isDirectory(); } catch { return false; }
 }
+// 零 tag 且零 commit 的影子仓库里没有任何可恢复内容，只剩失败的 commit 留下的孤立 blob
+// （2026-08-29 实测 10 个这种仓库堆了 8.3GB）。整目录删掉——这是翻箱自己的缓存，不是用户文件。
+// 判死活看 tag 不看 rev-list：快照全挂在 refs/tags/s* 下，健康仓库的 rev-list --all 也可能是 0
+async function snapReapIfEmpty(gitDir) {
+  if (!fs.existsSync(path.join(gitDir, 'HEAD'))) return false;
+  const tags = await execSnap(gitDir, null, ['tag', '-l', 's*']);
+  if (!tags.ok || tags.stdout.trim()) return false;
+  const head = await execSnap(gitDir, null, ['rev-parse', '--verify', '-q', 'HEAD']);
+  if (head.ok) return false;
+  await fsp.rm(gitDir, { recursive: true, force: true });
+  snapUsageCache = null;
+  console.log('  🧹  清掉没有任何快照的影子仓库：' + path.basename(gitDir));
+  return true;
+}
+async function snapReapAll() {
+  let names = [];
+  try { names = await fsp.readdir(SNAP_ROOT); } catch { return; }
+  for (const n of names) if (/^[0-9a-f]{16}$/.test(n)) await snapReapIfEmpty(path.join(SNAP_ROOT, n));
+}
 async function snapEnsureRepo(project) {
   const gitDir = snapGitDir(project);
+  await snapReapIfEmpty(gitDir); // 上次 commit 失败留下的空壳先清掉，重新 init 一个干净的
   if (!fs.existsSync(path.join(gitDir, 'HEAD'))) {
     await fsp.mkdir(gitDir, { recursive: true }).catch(() => {}); // git init 不建父目录
     const r = await execSnap(gitDir, project, ['init', '-q']);
@@ -1203,20 +1225,90 @@ async function snapshot(project, label) {
     if (add.killed) snapDead.add(project); // 超时 = 太大，别再试
     return { ok: false, skipped: add.killed ? 'too-big' : 'add-failed' };
   }
+  // 「无变化」看索引与 HEAD 的差异（退出码 0 = 无变化，1 = 有变化，其余 = 出错；HEAD 未诞生时也成立），
+  // 不再拿 commit 失败当依据：从前 commit 超时被当成「无变化」返回 ok，已 add 的 blob 永久留在仓库里
+  // 每轮开工再堆一批，回滚还把这个假 ok 当「已备份」直接 reset --hard——那一轮丢的是真工作区
+  const diff = await execSnap(gitDir, project, ['diff', '--cached', '--quiet'], 25000);
+  if (diff.ok) return { ok: true, skipped: 'no-change' };
+  if (diff.code !== 1) {
+    if (diff.killed) snapDead.add(project);
+    return { ok: false, skipped: 'diff-failed' };
+  }
   const msg = String(label || '回合存档').slice(0, 120);
   const ci = await execSnap(gitDir, project, [
     '-c', 'user.name=FanBox', '-c', 'user.email=snapshot@fanbox.local', '-c', 'commit.gpgsign=false',
     'commit', '-q', '--no-verify', '-m', msg,
   ], 20000);
-  if (!ci.ok) return { ok: true, skipped: 'no-change' }; // 与上个快照无差异
-  await execSnap(gitDir, project, ['tag', `s${Date.now()}`]);
+  if (!ci.ok) {
+    // 真失败：索引退回上个快照，再把这轮刚写进 objects/ 的孤立对象清掉（reset 只动索引，对象还在）
+    await execSnap(gitDir, project, ['reset', '-q'], 25000);
+    await execSnap(gitDir, project, ['prune', '--expire=now'], 60000);
+    if (ci.killed) snapDead.add(project);
+    return { ok: false, skipped: 'commit-failed' };
+  }
+  const tag = `s${Date.now()}`;
+  const tg = await execSnap(gitDir, project, ['tag', tag]);
+  if (!tg.ok) return { ok: false, skipped: 'tag-failed' }; // 列表只认 tag，没打上等于没存
   // tag 滚动裁剪：超出 SNAP_KEEP 删最旧，gc 交给 git 自己看着办
   const tags = (await execSnap(gitDir, project, ['tag', '-l', 's*'])).stdout.split('\n').filter(Boolean).sort();
   if (tags.length > SNAP_KEEP) {
     await execSnap(gitDir, project, ['tag', '-d', ...tags.slice(0, tags.length - SNAP_KEEP)]);
     execSnap(gitDir, project, ['gc', '--auto', '-q'], 60000); // 不 await，后台随缘
   }
-  return { ok: true, created: true };
+  snapUsageCache = null;
+  return { ok: true, created: true, tag };
+}
+// 占用透视：每个影子仓库多大、几个快照、是否已失效（零 tag = 没有任何可恢复内容）
+async function snapUsage() {
+  if (snapUsageCache && Date.now() - snapUsageCache.at < 60000) return snapUsageCache.data;
+  let idx = {};
+  try { idx = JSON.parse(await fsp.readFile(SNAP_INDEX, 'utf8')); } catch { /* 没索引也能算大小 */ }
+  let names = [];
+  try { names = (await fsp.readdir(SNAP_ROOT)).filter((n) => /^[0-9a-f]{16}$/.test(n)); } catch { /* 还没存过档 */ }
+  const sizes = {};
+  if (names.length) {
+    const out = await new Promise((resolve) => {
+      execFile('du', ['-sk', ...names.map((n) => path.join(SNAP_ROOT, n))], { timeout: 120000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => resolve(stdout || ''));
+    });
+    for (const line of out.split('\n')) {
+      const m = line.match(/^(\d+)\s+(.+)$/);
+      if (m) sizes[path.basename(m[2])] = Number(m[1]) * 1024;
+    }
+  }
+  const repos = [];
+  for (const dir of names) {
+    const tags = (await execSnap(path.join(SNAP_ROOT, dir), null, ['tag', '-l', 's*'])).stdout.split('\n').filter(Boolean);
+    const lastAt = tags.reduce((a, t) => Math.max(a, Number(t.slice(1)) || 0), 0) || null; // tag 名就是打快照的毫秒时间戳
+    repos.push({ project: idx[dir] || null, dir, bytes: sizes[dir] || 0, tags: tags.length, dead: tags.length === 0, lastAt });
+  }
+  repos.sort((a, b) => b.bytes - a.bytes);
+  const data = { ok: true, total: repos.reduce((a, r) => a + r.bytes, 0), repos };
+  snapUsageCache = { at: Date.now(), data };
+  return data;
+}
+// 清理：删某个项目的整个影子仓库，或删全部失效仓库。返回释放的字节数
+async function snapClean({ project, dead }) {
+  snapUsageCache = null; // 释放多少要按此刻的真实大小算
+  const usage = await snapUsage();
+  let targets;
+  if (dead) targets = usage.repos.filter((r) => r.dead);
+  else if (project) {
+    const norm = snapReal(path.normalize(resolvePath(project)).replace(/\/+$/, ''));
+    targets = usage.repos.filter((r) => r.project === norm);
+    if (!targets.length) return { ok: false, error: '这个目录还没有存档' };
+  } else return { ok: false, error: '缺少参数' };
+  let freed = 0;
+  let idx = {};
+  try { idx = JSON.parse(await fsp.readFile(SNAP_INDEX, 'utf8')); } catch { /* */ }
+  for (const r of targets) {
+    await fsp.rm(path.join(SNAP_ROOT, r.dir), { recursive: true, force: true });
+    freed += r.bytes;
+    delete idx[r.dir];
+    if (r.project) { snapDead.delete(r.project); snapThrottle.delete(r.project); }
+  }
+  if (targets.length) await fsp.writeFile(SNAP_INDEX, JSON.stringify(idx, null, 2)).catch(() => {});
+  snapUsageCache = null;
+  return { ok: true, removed: targets.length, freed };
 }
 // 列出某目录的快照：精确命中或该目录在某个已存档项目内（取最长前缀）
 async function snapResolveProject(p) {
@@ -1254,8 +1346,13 @@ async function snapRestore(p, hash) {
   const has = await execSnap(gitDir, project, ['cat-file', '-e', `${hash}^{commit}`]);
   if (!has.ok) return { ok: false, error: '找不到这个快照' };
   snapThrottle.delete(project); // 安全存档绝不能被节流吞掉：没备份就 reset 等于毁数据
-  const backup = await snapshot(project, '回滚前自动存档'); // 无变化时静默跳过，正合适
-  if (!backup.ok) return { ok: false, error: '当前状态存档失败，为安全起见不执行恢复' };
+  const backup = await snapshot(project, '回滚前自动存档');
+  // 硬门：只有「这次真的存下了」或「工作区与最新快照完全一致」才允许 reset --hard。
+  // 别信 ok 字段——从前 commit 超时也返回 ok，回滚拿它当「已备份」，抹掉的是用户没存过的活
+  if (!backup.created) {
+    const st = await execSnap(gitDir, project, ['status', '--porcelain'], 25000);
+    if (!st.ok || st.stdout.trim()) return { ok: false, error: '存档失败，未回滚' };
+  }
   const r = await execSnap(gitDir, project, ['reset', '--hard', hash, '-q'], 60000);
   snapThrottle.delete(project); // 回滚后下一轮 agent 开工要能立刻存档
   if (!r.ok) return { ok: false, error: '恢复失败：' + (r.stderr || '').slice(0, 200) };
@@ -1431,13 +1528,21 @@ async function pruneThumbs(maxBytes = 400 * 1024 * 1024) {
     const stats = (await Promise.all(files.map(async (f) => {
       if (f.startsWith('_ql_')) return null;
       const fp = path.join(THUMB_DIR, f);
-      try { const s = await fsp.stat(fp); return s.isFile() ? { fp, size: s.size, t: s.mtimeMs } : null; } catch { return null; }
+      // 按实际占用的块算而不是文件长度：几千个小 png 每个都有半块的零头，du 看到的比 size 之和多十几 MB
+      try { const s = await fsp.stat(fp); return s.isFile() ? { fp, size: s.blocks ? s.blocks * 512 : s.size, t: s.mtimeMs } : null; } catch { return null; }
     }))).filter(Boolean);
     let total = stats.reduce((a, b) => a + b.size, 0);
     if (total <= maxBytes) return;
     stats.sort((a, b) => a.t - b.t); // 最旧的先删
     for (const f of stats) { if (total <= maxBytes) break; await fsp.unlink(f.fp).catch(() => {}); total -= f.size; }
   } catch { /* 目录不存在等，忽略 */ }
+}
+// 生成过新缩略图就排一次裁剪：从前只在启动时裁，一个会话里翻几千张图缓存就越过上限几十 MB
+// （实测 461MB > 400MB）。合批成 5 秒一次，别让上百个并发 miss 各自 readdir 一遍几千个文件
+let pruneTimer = null;
+function pruneThumbsSoon() {
+  if (pruneTimer) return;
+  pruneTimer = setTimeout(() => { pruneTimer = null; pruneThumbs().catch(() => {}); }, 5000);
 }
 
 // 排版档把图片转 base64 时用：渲染进程受同源策略限制，抓不到图床里的外链图，
@@ -1555,7 +1660,7 @@ async function serveThumb(req, res, p, size, ver) {
   if (fs.existsSync(cacheFile)) return sendCache();
   let pr = thumbInflight.get(cacheFile);
   if (!pr) { pr = generateThumb(src, e, s, cacheFile, isImg).finally(() => thumbInflight.delete(cacheFile)); thumbInflight.set(cacheFile, pr); }
-  try { await pr; sendCache(); }
+  try { await pr; sendCache(); pruneThumbsSoon(); }
   catch { res.writeHead(415); res.end('no thumb'); } // 前端 onerror 回退矢量图标
 }
 
@@ -1578,7 +1683,7 @@ async function serveHeicAsJpeg(req, res, file, st) {
       .finally(() => thumbInflight.delete(cacheFile));
     thumbInflight.set(cacheFile, pr);
   }
-  try { await pr; pruneThumbs(); send(); }
+  try { await pr; pruneThumbsSoon(); send(); }
   catch { res.writeHead(415); res.end('heic transcode failed'); } // 前端 onerror 回退矢量图标
 }
 
@@ -2615,6 +2720,12 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/snapshots') {
       return sendJSON(res, 200, await snapList(qp.get('path')));
     }
+    if (p === '/api/snapshots/usage') {
+      return sendJSON(res, 200, await snapUsage());
+    }
+    if (p === '/api/snapshots/clean' && req.method === 'POST') {
+      return sendJSON(res, 200, await snapClean(await readBody(req)));
+    }
     if (p === '/api/snapshot-restore' && req.method === 'POST') {
       const b = await readBody(req);
       return sendJSON(res, 200, await snapRestore(b.path, b.hash));
@@ -2841,6 +2952,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log('  🏠  根目录:', HOME);
   console.log('\n  按 Ctrl+C 退出\n');
   pruneThumbs().catch(() => {}); // 启动时裁剪缩略图缓存，防止无限增长
+  snapReapAll().catch(() => {}); // 清掉一个快照都没有的影子仓库（只剩失败 commit 堆下的孤立对象）
   if (!process.env.FANBOX_NO_OPEN) {
     const opener = PLATFORM === 'darwin' ? 'open' : PLATFORM === 'win32' ? 'start' : 'xdg-open';
     exec(`${opener} ${link}`, () => {});
