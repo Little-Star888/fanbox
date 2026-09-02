@@ -398,6 +398,12 @@ ipcMain.handle('win:focus', () => {
   win.focus();
 });
 
+// Dock 角标：渲染层的指挥台算出「几个会话在等你」，窗口被遮住/最小化时还能从 Dock 一眼看到。空串即清空
+ipcMain.handle('win:badge', (e, { text }) => {
+  if (process.platform !== 'darwin' || !app.dock) return;
+  try { app.dock.setBadge(String(text || '')); } catch { /* */ }
+});
+
 // 预览全屏时藏掉左上角红黄绿系统按钮——它和右侧自家关闭图标太像，容易让人误点
 ipcMain.handle('win:traffic', (e, { show }) => {
   if (!win || win.isDestroyed() || typeof win.setWindowButtonVisibility !== 'function') return;

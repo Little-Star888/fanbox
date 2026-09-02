@@ -3083,6 +3083,7 @@ function bindEvents() {
     if (e.key === 'Escape' && !$('#preview').classList.contains('hidden')) { closePreview(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key === '[') { e.preventDefault(); goBack(); return; }
     if ((e.metaKey || e.ctrlKey) && (e.key === 'b' || e.key === 'B') && !inInput) { e.preventDefault(); toggleSidebar(); return; }
+    if ((e.metaKey || e.ctrlKey) && e.altKey && e.code === 'KeyL') { e.preventDefault(); roster.next(); return; } // 跳到下一个在等你的会话（终端里也响，按 code：mac 上 ⌥L 的 key 是 ¬）
     if (inInput) return;
     // 主区键盘导航
     if (e.key === 'ArrowDown') { e.preventDefault(); moveCursor(state.cols); }
@@ -3849,6 +3850,7 @@ const term = {
         term.adjustFont(sess, -1);
         return false;
       }
+      if (cmd && e.altKey && e.code === 'KeyL') return false; // ⌘⌥L 跳「下一个在等你的」：不给 xterm，冒泡到全局快捷键
       return true;
     });
 
@@ -4039,7 +4041,7 @@ const term = {
     s.host.remove();
     this.sessions.splice(i, 1);
     updateWatches(); // 该终端的项目目录不再需要监听
-    if (!this.sessions.length) { this.close(); return; }
+    if (!this.sessions.length) { this.close(); roster.render(); return; } // 不经 renderTabs，角标得在这清零
     if (this.active === id) this.activate(this.sessions[Math.max(0, i - 1)].id);
     else this.renderTabs();
   },
@@ -4180,6 +4182,7 @@ const term = {
       return;
     }
     s.hooked = true; s.agent = agent;
+    s.evState = state; roster.render(); // 指挥台按事件态分「等你确认 / 等你输入」；idle_prompt 来时下面可能直接 return，先画
     const now = Date.now();
     if (state === 'working') {
       $('#terminal-panel').classList.remove('term-awaiting');
@@ -4293,11 +4296,112 @@ const term = {
       t.ondblclick = (e) => { if (e.target.classList.contains('tab-x')) return; this.locateCwd(); };
       bar.appendChild(t);
     });
+    roster.render(); // 标签的每次变化指挥台都跟着重画（状态/标题/增删）
   },
   // 换主题后 WebGL 图集里缓存的还是旧配色字形，且 CJK 宽字符偶发图集损坏（#37/#45）：清一次图集强制重栅格化。
   // try/catch 兜住 GPU 故障，别让单个 session 的渲染异常连累其它 session 或拖垮渲染进程（#35）。
   retheme() { const th = this.theme(); this.sessions.forEach((s) => { try { s.xterm.options.theme = th; s.webgl?.clearTextureAtlas?.(); } catch { /* */ } }); },
 };
+
+// ---------- 指挥台：谁在等我 ----------
+// 真机 5 个 claude 并行时，状态只有标签上的小圆点，「下一个该看谁」全靠脑内记账。这里把每个会话摊成一行：
+// 状态（形状 + 颜色 + 文字三重编码，色弱也分得清）、项目、agent、已跑时长、最后一句话、本回合改了几个文件；
+// 只在会话 ≥ 2 时出现（一个会话没有「谁在等我」的问题）。⌘⌥L 循环跳到下一个需要你的；「需要你」的数量同步到 Dock 角标。
+// hooked 会话吃 hooks 事件态，未 hooked 的沿用 busy/idle + 确认文案判定——所以对任何 agent、裸 shell 都管用
+const roster = {
+  _tick: null, _badge: null, _iconWanted: new Set(), _h: 0,
+  LABEL: { working: '干活中', ask: '等你确认', input: '等你输入', idle: '空闲', dead: '已退出' },
+  // 形状：实心圆 / 三角 / 菱形 / 空心圆 / 叉——不靠颜色也能一眼分开
+  SHAPE: {
+    working: '<svg viewBox="0 0 10 10" width="10" height="10"><circle cx="5" cy="5" r="4" fill="currentColor"/></svg>',
+    ask: '<svg viewBox="0 0 10 10" width="10" height="10"><path d="M5 .8 9.6 9.2H.4Z" fill="currentColor"/></svg>',
+    input: '<svg viewBox="0 0 10 10" width="10" height="10"><path d="M5 .5 9.5 5 5 9.5.5 5Z" fill="currentColor"/></svg>',
+    idle: '<svg viewBox="0 0 10 10" width="10" height="10"><circle cx="5" cy="5" r="3.4" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>',
+    dead: '<svg viewBox="0 0 10 10" width="10" height="10"><path d="M2 2l6 6M8 2l-6 6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+  },
+  // 五态：working / ask（等你确认）/ input（等你输入）/ idle / dead
+  stateOf(s) {
+    if (s.dead) return 'dead';
+    if (s.hooked) {
+      if (s.evState === 'needs_permission') return 'ask';
+      if (s.evState === 'needs_input') return 'input';
+      return s.status === 'busy' ? 'working' : 'idle';
+    }
+    if (s.status === 'busy') return 'working';
+    return TERM_ASK_RE.test(term.tailText(s)) ? 'ask' : 'idle'; // 未 hooked：停在审批界面就是等你确认
+  },
+  // 「刚完成未看」：干活中 → 空闲的那一下你没正看着它（非当前标签或窗口失焦）就记一笔，看到即清。
+  // 未 hooked 的沿用通知同一道 4s 门槛，免得裸 shell 跑个 ls 也算「任务完成」
+  track(s, st) {
+    const seen = s.id === term.active && document.hasFocus();
+    if (st === 'idle' && s._rState === 'working' && !seen && (s.hooked || Date.now() - (s.busyStart || 0) > 4000)) s._fresh = true;
+    if (st !== 'idle' || seen) s._fresh = false;
+    s._rState = st;
+  },
+  // 需要你的优先级：等你确认 > 等你输入 > 刚完成未看；0 = 不需要
+  tier(s, st) { return st === 'ask' ? 1 : st === 'input' ? 2 : (st === 'idle' && s._fresh) ? 3 : 0; },
+  dur(ms) {
+    const t = Math.max(0, Math.round(ms / 1000)), h = Math.floor(t / 3600), m = Math.floor(t % 3600 / 60), s = t % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(s).padStart(2, '0');
+  },
+  agentIcon(id) {
+    const key = String(id).replace(/[^\w-]/g, '');
+    if (agentIconCache.has(key)) return agentIconCache.get(key) || escapeHtml(key.slice(0, 1).toUpperCase());
+    if (!this._iconWanted.has(key)) { this._iconWanted.add(key); agentIconHtml(key).then(() => this.render()); } // 首次异步取，到了重画
+    return '';
+  },
+  changed(s) { return state.changeLog.filter((c) => c.termId === s.id).length; },
+  say(s, st) { return st === 'dead' ? '' : escapeHtml(term.lastReplyExcerpt(s, 90)); },
+  rowHtml(s, st) {
+    const hue = term.hueOf(s.cwd || s.startDir);
+    const icon = s.agent ? this.agentIcon(s.agent) : ic('term', `hsl(${hue} 62% 48%)`, 12);
+    const dur = st === 'working' ? `<span class="tr-dur">${this.dur(Date.now() - (s.busyStart || Date.now()))}</span>` : '';
+    const fresh = st === 'idle' && s._fresh ? '<span class="tr-tag">刚完成</span>' : '';
+    const n = this.changed(s);
+    return `<div class="tr-row st-${st}${s.id === term.active ? ' active' : ''}" data-id="${s.id}" title="点击切到该标签">
+      <span class="tr-shape" title="${this.LABEL[st]}">${this.SHAPE[st]}</span><span class="tr-agent">${icon}</span><span class="tr-name">${escapeHtml(s.title || 'shell')}</span>
+      <span class="tr-st">${this.LABEL[st]}</span>${dur}${fresh}<span class="tr-say">${this.say(s, st)}</span><span class="tr-files"${n ? ` title="本回合改动 ${n} 个文件"` : ''}>${n ? n + ' 文件' : ''}</span></div>`;
+  },
+  render() {
+    const box = $('#term-roster'); if (!box) return;
+    const list = term.sessions.map((s) => { const st = this.stateOf(s); this.track(s, st); return { s, st }; });
+    // Dock 角标：几个会话在等你。不看指挥台显不显示——一个会话在等你也该亮
+    const need = list.filter((x) => this.tier(x.s, x.st)).length;
+    if (need !== this._badge && window.fanboxWin && window.fanboxWin.setBadge) { this._badge = need; window.fanboxWin.setBadge(need ? String(need) : ''); }
+    const show = list.length >= 2;
+    box.classList.toggle('hidden', !show);
+    if (!show) { box.innerHTML = ''; this.stopTick(); if (this._h) { this._h = 0; term.fitActive(); } return; }
+    box.innerHTML = list.map(({ s, st }) => this.rowHtml(s, st)).join('');
+    box.querySelectorAll('.tr-row').forEach((el) => { el.onclick = () => term.activate(el.dataset.id); });
+    const h = box.offsetHeight;
+    if (h !== this._h) { this._h = h; term.fitActive(); } // 条的高度变了（出现/行数变）xterm 得重新量行数
+    list.some((x) => x.st === 'working') ? this.startTick() : this.stopTick();
+  },
+  // 干活中的行每秒刷时长 / 最后一句 / 改动数，不整条重画（重画会抖 hover）
+  startTick() {
+    if (this._tick) return;
+    this._tick = setInterval(() => {
+      document.querySelectorAll('#term-roster .tr-row').forEach((el) => {
+        const s = term.sessions.find((x) => x.id === el.dataset.id); if (!s) return;
+        const d = el.querySelector('.tr-dur'); if (d) d.textContent = this.dur(Date.now() - (s.busyStart || Date.now()));
+        el.querySelector('.tr-say').innerHTML = this.say(s, this.stateOf(s));
+        const n = this.changed(s); el.querySelector('.tr-files').textContent = n ? n + ' 文件' : '';
+      });
+    }, 1000);
+  },
+  stopTick() { clearInterval(this._tick); this._tick = null; },
+  // ⌘⌥L：跳到下一个需要你的会话。按优先级排好队，从当前所在位置往后循环，没有就说一声
+  next() {
+    const list = term.sessions.map((s) => ({ s, t: this.tier(s, this.stateOf(s)) })).filter((x) => x.t).sort((a, b) => a.t - b.t);
+    if (!list.length) { toast('没有在等你的'); return; }
+    const i = list.findIndex((x) => x.s.id === term.active);
+    const pick = list[(i + 1) % list.length].s;
+    if ($('#terminal-panel').classList.contains('hidden')) term.open();
+    term.activate(pick.id);
+  },
+};
+// 窗口拿回焦点 = 你在看当前标签：「刚完成未看」就算看过了，角标随之减
+window.addEventListener('focus', () => roster.render());
 
 // ---------- Agent 用量面板（侧栏常驻，可开合）----------
 // Claude Code 是官方限额窗口（5h/周，OAuth 接口）+ 本地 token 统计兜底，Codex 是官方配额快照（来自其会话日志）
