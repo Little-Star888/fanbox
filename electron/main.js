@@ -669,6 +669,16 @@ function buildMenu() {
         label: lidActive ? M('合盖继续干活（生效中）', 'Keep working with lid closed (active)') : M('合盖继续干活', 'Keep working with lid closed'),
         type: 'checkbox', checked: lidIntent,
         click: (item) => { setLidIntent(item.checked); },
+      }, {
+        // 微信遥控不断线：从侧栏「离开电脑」区块挪进来，和上一项成对。开关本体是下方微信段的
+        // power:setWechat handler（要联动 bridge），这里借渲染层的 preload 桥绕一圈调它，不动那段代码；
+        // 取消 / 失败时 handler 不会重建菜单，所以回来自己 buildMenu 一次把勾选复位
+        label: (wechatStayAwake && wechatConnected) ? M('微信遥控不断线（生效中）', 'Stay awake for WeChat (active)') : M('微信遥控不断线', 'Stay awake for WeChat'),
+        type: 'checkbox', checked: wechatStayAwake,
+        click: (item) => {
+          const p = win && !win.isDestroyed() ? win.webContents.executeJavaScript(`window.fanboxPower && window.fanboxPower.setWechat(${!!item.checked})`, true) : Promise.resolve();
+          p.catch(() => {}).then(() => buildMenu());
+        },
       }] : []),
     ] },
     { role: 'window', label: M('窗口', 'Window'), submenu: [{ role: 'minimize', label: M('最小化', 'Minimize') }, { role: 'zoom' }] },

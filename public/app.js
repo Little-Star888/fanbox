@@ -55,6 +55,7 @@ const SVG = {
   globe: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
   gitbranch: '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
+  more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
   maximize: '<polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/>',
   minimize: '<polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/>',
   undo: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
@@ -384,13 +385,12 @@ function visibleEntries() {
   else list.sort((a, b) => dirFirst(a, b) || a.name.localeCompare(b.name, 'zh', { numeric: true }));
   return list;
 }
-// 底部状态条：当前文件夹的基础信息小字常驻，「占用透视」入口也安在这
+// 底部状态条：当前文件夹的两个 agent 记忆入口（磁盘占用透视在侧栏「更多…」和右键菜单里）
 function renderStatusbar() {
   const sb = $('#statusbar'); if (!sb) return;
   if (state.skillsMode || state.recentMode || !state.cwd) { sb.classList.add('hidden'); return; }
   sb.classList.remove('hidden');
-  sb.innerHTML = `<span class="sb-links"><a id="sb-mem" title="这个文件夹里 AI 干过什么：历史会话、改过的文件、一键续上">项目记忆</a><a id="sb-snap" title="agent 每轮开工前的自动存档，可一键回到任意一轮之前">回合存档</a><a id="sb-du" title="算上子目录的真实磁盘占用">占用透视</a></span>`;
-  $('#sb-du').onclick = () => diskPanel(state.cwd);
+  sb.innerHTML = `<span class="sb-links"><a id="sb-mem" title="这个文件夹里 AI 干过什么：历史会话、改过的文件、一键续上">项目记忆</a><a id="sb-snap" title="agent 每轮开工前的自动存档，可一键回到任意一轮之前">回合存档</a></span>`;
   $('#sb-mem').onclick = () => memoryPanel(state.cwd);
   $('#sb-snap').onclick = () => snapshotPanel(state.cwd);
 }
@@ -886,18 +886,22 @@ function renderPreviewActions(e) {
   const box = $('#preview-actions');
   box.innerHTML = '';
   const clip = window.fanboxClipboard;
-  // 图标为主、文字精简：主操作「打开」留字，其余只留图标 + tooltip
+  // 只留两个带字的主操作（打开 / 编辑）和一个全屏开关；其余低频动作收进「…」菜单——
+  // 八个无字图标排一行，没人记得住哪个是哪个
+  const more = [
+    ...(e.kind === 'text' ? [{ label: '查看改动（HEAD vs 当前）', fn: () => showDiff(e) }] : []),
+    { label: '在编辑器打开', fn: () => openWith(e.path, 'editor') },
+    { label: '在访达显示', fn: () => openWith(e.path, 'reveal') },
+    ...(e.kind === 'image' && clip ? [{ label: '复制图片（可粘贴到其它应用）', fn: () => copyImage(e.path) }] : []),
+    ...(clip ? [{ label: '复制文件（访达里可粘贴）', fn: () => copyFile(e.path) }] : []),
+    { label: '复制路径', fn: () => copyPath(e.path) },
+  ];
   const acts = [
     { id: 'preview-maxbtn', icon: ic(previewMax ? 'minimize' : 'maximize', 'currentColor', 15), title: previewMax ? '退出全屏' : '全屏放大', fn: () => setPreviewMax() },
     { icon: ic('link', 'currentColor', 14), label: '打开', title: '默认应用打开', cls: 'primary', fn: () => openWith(e.path, 'default') },
-    ...(e.kind === 'text' && !isMdName(e.name) ? [{ icon: ic('edit3', 'currentColor', 15), title: '编辑文本', fn: () => enterEditMode(e) }] : []), // md 预览即编辑，无需入口
-    ...(e.kind === 'text' ? [{ icon: ic('gitbranch', 'currentColor', 15), title: '查看改动（HEAD vs 当前）', fn: () => showDiff(e) }] : []),
-    ...(e.kind === 'image' ? [{ icon: ic('edit3', 'currentColor', 15), title: '编辑图片', fn: () => enterImageEdit(e) }] : []),
-    { icon: ic('term', 'currentColor', 15), title: '在编辑器打开', fn: () => openWith(e.path, 'editor') },
-    { icon: ic('folder', 'currentColor', 15), title: '在访达显示', fn: () => openWith(e.path, 'reveal') },
-    ...(e.kind === 'image' && clip ? [{ icon: ic('image', 'currentColor', 15), title: '复制图片（可粘贴到其它应用）', fn: () => copyImage(e.path) }] : []),
-    ...(clip ? [{ icon: ic('copy', 'currentColor', 15), title: '复制文件（访达里可粘贴）', fn: () => copyFile(e.path) }] : []),
-    { icon: ic('clip', 'currentColor', 15), title: '复制路径', fn: () => copyPath(e.path) },
+    ...(e.kind === 'text' && !isMdName(e.name) ? [{ icon: ic('edit3', 'currentColor', 15), label: '编辑', title: '编辑文本', fn: () => enterEditMode(e) }] : []), // md 预览即编辑，无需入口
+    ...(e.kind === 'image' ? [{ icon: ic('edit3', 'currentColor', 15), label: '编辑', title: '编辑图片', fn: () => enterImageEdit(e) }] : []),
+    { id: 'preview-more', icon: ic('more', 'currentColor', 15), title: '更多操作', fn: (ev) => (ev.stopPropagation(), popupMenuAt(ev.currentTarget, more)) },
   ];
   acts.forEach((a) => {
     const b = document.createElement('button');
@@ -1652,7 +1656,7 @@ async function mdEditor(e, data, mode = 'rich') {
     const hostCls = { rich: 'crepe-host', read: 'read-host', code: 'mona-host' }[m];
     const seg = (id, label, on) =>
       `<button class="seg-btn${m === id ? ' active' : ''}" data-m="${id}"${on ? '' : ' disabled title="此文件含富文本无法无损保存的语法，改请用源码"'}>${label}</button>`;
-    const hint = m === 'read' ? (forceCode ? '只读 · 此文件富文本往返有损，要改请点源码' : '只读 · 要改请点富文本或源码')
+    const hint = m === 'read' ? (forceCode ? '此文件用源码模式编辑' : '只读 · 要改请点富文本或源码')
       : '自动保存 · ⌘S 立即保存';
     // 插入图片：source/rich 都能用，唯独只读（有损文件的兜底阅读态）没意义，不给按钮添乱
     const insImgBtn = m !== 'read' ? `<button id="ed-insimg-btn" class="ghost-btn" type="button">+ 插入图片</button>` : '';
@@ -1698,8 +1702,7 @@ async function mdEditor(e, data, mode = 'rich') {
       if (!semanticEqual(front + inst.getMarkdown(), content0)) {
         crepe.disposeIfAny();
         forceCode = true;
-        toast('此文件富文本往返有损，已切到只读阅读模式（要改点源码）');
-        return render('read');
+        return render('read'); // 状态条会写明「此文件用源码模式编辑」，不再额外弹 toast
       }
       try { inst.on((l) => l.markdownUpdated(() => queue())); } catch { /* 旧版 Crepe 无 .on，靠下面的 input 兜底 */ }
       host.addEventListener('input', () => queue(), true); // 兜底：键入路径一定触发
@@ -2169,6 +2172,14 @@ function showContextMenu(ev, e) {
   items.push({ label: '移到废纸篓', danger: true, fn: () => doTrash(e) });
   popupMenu(ev, items);
 }
+// 贴着某个按钮下沿弹菜单（侧栏「更多…」、预览「…」、终端「…」共用；调用方要先 stopPropagation，否则这次点击会冒泡到 document 把菜单当场关掉）
+function popupMenuAt(el, items) {
+  const r = el.getBoundingClientRect();
+  popupMenu({ clientX: r.left, clientY: r.bottom + 4 }, items);
+  // 下方放不下（侧栏贴底的「更多…」）就翻到按钮上方，别压住按钮本身
+  const m = $('#context-menu');
+  if (m && r.bottom + 4 + m.offsetHeight > window.innerHeight - 8) m.style.top = Math.max(8, r.top - m.offsetHeight - 4) + 'px';
+}
 // 在鼠标位置弹一个菜单（右键菜单与空白处双击菜单共用）
 function popupMenu(ev, items) {
   closeContextMenu();
@@ -2302,6 +2313,10 @@ async function loadAgentProjects() {
       when.appendChild(dot);
     });
     when.append(agoShort(pj.lastActive));
+    // 两个色点没有文字，悬停给一张图例（复用侧栏解释卡）
+    sideHoverCard(when, () => `<b>Agent 项目</b>
+      <p><i class="agent-dot claude"></i>Claude Code　<i class="agent-dot codex"></i>Codex</p>
+      <p class="tip-note">色点是最近处理过这个项目的 agent，右侧是它最后一次活跃距今多久</p>`);
     li.appendChild(when);
     ul.appendChild(li);
   });
@@ -2431,20 +2446,26 @@ function maybeShowGuide() {
   if (localStorage.getItem('fb_guided')) return;
   const ov = document.createElement('div');
   ov.className = 'guide-overlay';
+  // 一屏说完：一句定位、两个能立刻做的动作。快捷键清单不放这——没人在第一屏记得住
   ov.innerHTML = `<div class="guide-card">
     <div class="guide-logo">${svgWrap(SVG.box, 'currentColor', 46, true)}</div>
-    <h2>欢迎用 FanBox</h2>
-    <p>vibe coding 的驾驶舱——找文件、跑 agent、看它改、随手改，都在一个窗口：</p>
-    <ul>
-      <li><b>⌘K</b> 全局搜文件和文件夹；<b>⌘↵</b> 把项目直接在编辑器整包打开；<code>内容:关键词</code> 搜文件里的字</li>
-      <li>顶部 <b>终端</b> 按钮开内嵌终端跑 Claude Code 等 agent；<b>把文件/文件夹拖进终端</b> 即插入路径喂给它当上下文</li>
-      <li><b>单击</b> 预览，<b>双击</b> 系统打开；预览里 <b>编辑</b> md 走所见即所得、<b>编辑图片</b> 可标注/打码/转格式</li>
-      <li>agent 改了哪些文件，列表实时高亮「改·N」，不用切窗口盯着看</li>
-    </ul>
-    <button id="guide-ok">开始使用</button>
+    <h2>FanBox</h2>
+    <p>找回文件、指挥 agent、看清它改了什么。</p>
+    <div class="guide-actions">
+      <button id="guide-open" class="primary">打开一个项目</button>
+      <button id="guide-agent">启动 Claude Code</button>
+    </div>
+    <a id="guide-skip" class="guide-skip">稍后再说</a>
   </div>`;
   document.body.appendChild(ov);
-  $('#guide-ok').onclick = () => { localStorage.setItem('fb_guided', '1'); ov.remove(); };
+  const done = () => { localStorage.setItem('fb_guided', '1'); ov.remove(); };
+  $('#guide-open').onclick = () => { done(); cmdk.open(); }; // ⌘K 面板：搜到项目回车即进
+  $('#guide-agent').onclick = () => { // 走一键启动按钮同一条路（空闲终端就地起，忙则新标签）
+    done();
+    const a = activeAgents().find((x) => x.id === 'claude') || AGENT_REGISTRY.find((x) => x.id === 'claude');
+    if (a) term.launchAgent(a.cmd);
+  };
+  $('#guide-skip').onclick = done;
 }
 
 // ---------- 预览面板拖拽调宽 ----------
@@ -2972,9 +2993,6 @@ function bindEvents() {
   $('#cmdk-trigger').onclick = () => cmdk.open();
   $('#btn-recent').onclick = showRecent;
   $('#btn-changes').onclick = () => toggleChangesPanel();
-  $('#term-wechat').onclick = () => wechatView.toggle();
-  // 启动时点一下连接状态，连着就给终端里的微信按钮点绿点（不挡初始化）
-  if (window.fanboxWechat) window.fanboxWechat.env().then((e) => wechatView.syncDot(!!(e && e.connected))).catch(() => {});
   $('#btn-terminal').onclick = () => term.toggle();
   bindAgentButtons();
   usagePanel.bind();
@@ -2982,21 +3000,29 @@ function bindEvents() {
   $('#skills-entry').onclick = () => skillsView.show();
   $('#cron-entry').onclick = () => cronPanel.show();
   $('#term-newtab').onclick = () => { wechatView.close(); term.newTab(); };
-  $('#term-max').onclick = () => term.toggleMax();
   // 双击终端顶栏空白处（避开标签/按钮/输入框）= 铺满终端：agent 交互窗口最重要，给它一键放到最大
   $('.term-head').addEventListener('dblclick', (ev) => {
     if (ev.target.closest('button, .term-tab, input')) return;
     term.toggleMax();
   });
-  $('#term-dock').onclick = () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom');
-  $('#term-replay').onclick = () => player.open();
-  const muteBtn = $('#term-mute');
-  const syncMute = () => { muteBtn.textContent = state.muted ? '🔕' : '🔔'; muteBtn.title = state.muted ? '提示音已关（点击开启）' : '提示音已开（点击静音）'; };
-  syncMute();
-  muteBtn.onclick = () => { state.muted = !state.muted; localStorage.setItem('fb_muted', state.muted ? '1' : '0'); syncMute(); if (!state.muted) playChime('tick'); };
+  // 终端「…」：低频工具按当前状态给动词，菜单项自己说明会发生什么
+  $('#term-more').onclick = (ev) => (ev.stopPropagation(), popupMenuAt(ev.currentTarget, [
+    { label: follow.on ? '停止文件跟随' : '开启文件跟随', fn: () => setFileFollow(!follow.on) },
+    { label: term.maximized ? '还原终端' : '终端铺满', fn: () => term.toggleMax() },
+    { label: term.dock === 'bottom' ? '布局改为左右' : '布局改为上下', fn: () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom') },
+    { label: state.muted ? '开启提示音' : '关闭提示音', fn: () => { state.muted = !state.muted; localStorage.setItem('fb_muted', state.muted ? '1' : '0'); if (!state.muted) playChime('tick'); } },
+    { label: '终端录像', fn: () => player.open() },
+  ]));
+  // 侧栏「更多…」：五个低频功能的唯一常驻入口（代码各自原样保留，只是不再占主界面）
+  $('#more-entry').onclick = (ev) => (ev.stopPropagation(), popupMenuAt(ev.currentTarget, [
+    { label: '微信 ClawBot', fn: () => wechatView.toggle() },
+    { label: 'AI 整理当前目录…', fn: () => organizeLaunch(state.cwd || state.home) },
+    { label: '终端录像', fn: () => player.open() },
+    { label: '发版向导…', fn: () => releasePanel() },
+    { label: '磁盘占用透视', fn: () => diskPanel(state.cwd || state.home) },
+  ]));
   $('#term-close').onclick = () => term.close();
   $('#btn-sidebar').onclick = () => toggleSidebar();
-  $('#file-follow').onclick = () => setFileFollow(!follow.on);
   // 定位文件按钮已撤（双击终端 tab 即可定位，见 term.locateCwd / renderTabs 的 ondblclick）
   // 终端随窗口尺寸变化重排，避免 TUI 错位
   window.addEventListener('resize', () => term.fitActive());
@@ -3393,7 +3419,7 @@ const player = {
   // 入口发现性：有录像时给回放按钮点一个小红点（飞行记录仪默默录了一堆，得让用户知道能回看）
   async refreshHint() {
     if (!window.fanboxRec) return;
-    const btn = $('#term-replay'); if (!btn) return;
+    const btn = $('#term-more'); if (!btn) return; // 录像入口在终端「…」里，红点打在它身上
     try { const r = await window.fanboxRec.list(); btn.classList.toggle('has-rec', !!(r && r.items && r.items.length)); } catch { /* */ }
   },
 };
@@ -5372,67 +5398,6 @@ function sideHoverCard(el, build) {
   window.addEventListener('blur', hide);
 }
 
-// ---------- 侧栏「离开电脑」：合盖继续干活 / 微信遥控不断线（macOS 桌面版专属）----------
-const powerBar = {
-  st: null,
-  async init() {
-    if (!window.fanboxPower) return; // 浏览器版 / 老 preload：整段不显示
-    const st = await window.fanboxPower.state().catch(() => null);
-    if (!st || st.platform !== 'darwin') return; // 禁休眠靠 pmset，仅 macOS
-    this.st = st;
-    $('#power-sec').classList.remove('hidden');
-    $('#pw-lid').onclick = () => this.flip('lid');
-    $('#pw-wechat').onclick = () => this.flip('wechat');
-    sideHoverCard($('#pw-lid'), () => this.tipLid());
-    sideHoverCard($('#pw-wechat'), () => this.tipWechat());
-    window.fanboxPower.onChange((m) => { this.st = m; this.sync(); });
-    this.sync();
-  },
-  async flip(kind) {
-    const st = this.st || {};
-    const on = !(kind === 'lid' ? st.lid : st.wechat);
-    const r = await (kind === 'lid' ? window.fanboxPower.setLid(on) : window.fanboxPower.setWechat(on)).catch(() => null);
-    if (r) { this.st = r; this.sync(); }
-    if (r && r.ok) {
-      if (kind === 'lid') toast(r.on ? '已开启 · agent 干活时合盖不休眠' : '已关闭 · 合盖照常休眠');
-      else toast(r.on ? '已开启 · 微信连着时不休眠' : '已关闭 · 恢复正常休眠');
-    } else if (r && r.error && r.error !== 'cancelled' && r.error !== 'setup-cancelled') toast('开启失败：' + r.error, true);
-  },
-  sync() {
-    const st = this.st; if (!st) return;
-    const row = (id, on, lit) => {
-      const el = $(id); if (!el) return;
-      el.querySelector('.pw-switch').classList.toggle('on', on);
-      el.querySelector('.pw-dot').classList.toggle('lit', lit);
-    };
-    row('#pw-lid', !!st.lid, !!st.lidHolding);
-    row('#pw-wechat', !!st.wechat, !!st.wechatHolding);
-  },
-  tipLid() {
-    const st = this.st || {};
-    let now;
-    if (!st.lid) now = '现在：未开启，合盖照常休眠';
-    else if (st.lidHolding) now = `现在：${st.terms} 个终端开着，agent 正在干活 → 生效中，合盖也不休眠`;
-    else if (st.terms > 0) now = `现在：${st.terms} 个终端开着但都空闲 → 合盖照常休眠`;
-    else now = '现在：没有终端会话 → 合盖照常休眠';
-    return `<b>合盖继续干活</b>
-      <p>翻箱盯着每个终端窗口的工作状态。开启后：只要检测到有 agent 正在干活，合上盖子 Mac 也不休眠，任务接着跑；所有终端都空闲约两分钟后，自动恢复正常休眠——不会让 Mac 一直不睡。</p>
-      <p class="tip-note">合盖跑任务持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。</p>
-      <p class="tip-state">${escapeHtml(now)}</p>`;
-  },
-  tipWechat() {
-    const st = this.st || {};
-    let now;
-    if (!st.wechat) now = '现在：未开启，合盖照常休眠';
-    else if (st.wechatHolding) now = '现在：微信已连接 → 生效中，合盖 / 息屏也不休眠';
-    else now = '现在：微信未连接 → 暂不生效，连上后自动开始守护';
-    return `<b>微信遥控不断线</b>
-      <p>开启后，手机微信连着 ClawBot 期间，合盖 / 息屏也不休眠——人在外面也能一直用微信遥控本机的 Claude Code / Codex；微信断开自动恢复正常休眠。</p>
-      <p class="tip-note">持续耗电发热，建议接电源。首次开启需输一次管理员密码（装一条仅限电源设置的免密规则）。</p>
-      <p class="tip-state">${escapeHtml(now)}</p>`;
-  },
-};
-
 // ---------- 版本号与版本历史：brand 旁小版本标，悬停看最新更新，点击看全部 ----------
 const verInfo = {
   data: null,
@@ -5771,7 +5736,6 @@ async function init() {
   await Promise.all([loadRoots(), loadFavorites(), navigate(lastDir || '', false)]);
   if (!state.cwd) await navigate(state.home, false);
   renderRootsActive(); // 列表可能比侧栏先到，这时侧栏还没东西可高亮，补一次
-  powerBar.init();
   verInfo.init();
   cronPanel.syncBadge();
   loadAgentProjects();
