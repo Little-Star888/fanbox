@@ -158,16 +158,13 @@ kbd {
 .agent-dot.claude { background: #d97757; }
 .agent-dot.codex { background: #10a37f; }
 .brand .logo { color: var(--accent); }
-/* ---------- Skills 透视入口（侧栏底部工具簇）---------- */
-#skills-entry { margin-top: auto; padding: 12px 16px 0; border-top: 1px solid var(--border); cursor: pointer; user-select: none; }
-#skills-entry:hover { color: var(--text-dim); }
-#cron-entry { padding: 10px 16px 0; cursor: pointer; user-select: none; }
-#cron-entry:hover { color: var(--text-dim); }
+/* ---------- 侧栏「工具」簇：贴底，行样式沿用 .nav-list li ---------- */
+.nav-tools { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); }
+.side-link { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; user-select: none; font-size: 13px; color: var(--text-dim); transition: 0.12s; white-space: nowrap; }
+.side-link:hover { background: var(--bg-3); color: var(--text); }
+.side-link svg { flex-shrink: 0; }
 
 /* ---------- Agent 用量（侧栏底部，可开合）---------- */
-#usage-sec { padding: 12px 8px 6px; border-top: none; margin-top: 6px; }
-#usage-sec .nav-title { cursor: pointer; user-select: none; padding-bottom: 0; }
-#usage-sec .nav-title:hover { color: var(--text-dim); }
 #usage-arrow { margin-left: auto; font-size: 10px; }
 #usage-body { padding: 8px 8px 2px; font-size: 12px; }
 #usage-body.hidden { display: none; }
@@ -186,25 +183,13 @@ kbd {
 .usage-trio span { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 1px; background: var(--bg-3); border-radius: 6px; padding: 5px 2px; font-size: 10px; color: var(--text-faint); }
 .usage-trio b { font-size: 12.5px; color: var(--text); font-variant-numeric: tabular-nums; }
 
-/* ---------- 侧栏「离开电脑」：合盖继续干活 / 微信遥控不断线 ---------- */
-#power-sec { padding: 10px 0 4px; border-top: 1px solid var(--border); }
-#power-sec.hidden { display: none; }
-.pw-row { display: flex; align-items: center; gap: 7px; padding: 5px 10px; border-radius: 7px; cursor: pointer; user-select: none; }
-.pw-row:hover { background: var(--bg-3); }
-.pw-label { flex: 1; font-size: 12.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pw-row:hover .pw-label { color: var(--text); }
-.pw-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex: 0 0 6px; }
-.pw-dot.lit { background: #07C160; box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.16); }
-.pw-switch { flex: none; width: 30px; height: 17px; border: 1px solid var(--border); border-radius: 99px; background: var(--bg-3); position: relative; cursor: pointer; transition: 0.15s; }
-.pw-switch i { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: var(--text-faint); transition: 0.15s; }
-.pw-switch.on { background: var(--accent); border-color: var(--accent); }
-.pw-switch.on i { left: 15px; background: var(--accent-ink); }
 
 /* 侧栏悬停解释卡：出现在侧栏右侧，pointer-events 关掉、绝不抢鼠标 */
 .side-tip { position: fixed; z-index: 60; width: 300px; max-width: calc(100vw - 24px); background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: var(--shadow); padding: 12px 14px; pointer-events: none; font-size: 12px; line-height: 1.65; color: var(--text-dim); }
 .side-tip b { display: inline-block; font-size: 12.5px; color: var(--text); margin-bottom: 4px; }
 .side-tip p { margin: 4px 0 0; }
 .side-tip .tip-note { color: var(--text-faint); }
+.side-tip .agent-dot { display: inline-block; vertical-align: middle; margin-right: 4px; }
 .side-tip .tip-state { margin-top: 8px; padding-top: 7px; border-top: 1px dashed var(--border); color: var(--text); }
 .side-tip .tip-date { float: right; color: var(--text-faint); font-size: 11px; }
 .side-tip .tip-md { max-height: 300px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 82%, transparent); mask-image: linear-gradient(#000 82%, transparent); }
@@ -759,13 +744,13 @@ kbd {
 .guide-card { width: 460px; max-width: 90vw; background: var(--bg-2); border: 1px solid var(--border); border-radius: 16px; padding: 32px; box-shadow: var(--shadow); }
 .guide-logo { font-size: 44px; text-align: center; color: var(--accent); }
 .guide-card h2 { text-align: center; margin: 8px 0 14px; font-size: 20px; }
-.guide-card p { color: var(--text-dim); margin-bottom: 14px; }
-.guide-card ul { list-style: none; display: flex; flex-direction: column; gap: 12px; margin-bottom: 22px; }
-.guide-card li { font-size: 13.5px; line-height: 1.6; color: var(--text-dim); padding-left: 14px; border-left: 2px solid var(--accent); }
-.guide-card li b { color: var(--text); }
-.guide-card code { background: var(--bg-3); padding: 1px 6px; border-radius: 4px; color: var(--accent); font-size: 12px; }
-.guide-card button { width: 100%; padding: 11px; background: var(--accent); border: none; border-radius: 9px; color: var(--accent-ink); font-size: 14px; font-weight: 600; cursor: pointer; }
+.guide-card p { color: var(--text-dim); text-align: center; font-size: 14.5px; margin-bottom: 22px; }
+.guide-actions { display: flex; gap: 10px; }
+.guide-card button { flex: 1; padding: 11px; background: var(--bg-3); border: 1px solid var(--border); border-radius: 9px; color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
+.guide-card button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .guide-card button:hover { filter: brightness(1.1); }
+.guide-skip { display: block; text-align: center; margin-top: 14px; font-size: 12.5px; color: var(--text-faint); cursor: pointer; }
+.guide-skip:hover { color: var(--text-dim); }
 
 /* 细圆角胶囊 + 透明边距（macOS overlay 风格）；hover 色跟主题走，别写死深色 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -1036,10 +1021,6 @@ kbd {
 .wx-send:hover:not(:disabled) { background: var(--bg-3); }
 .wx-send:disabled { opacity: .4; cursor: default; }
 /* term-head 里的微信按钮：连上后点亮绿点 */
-.wechat-btn { position: relative; }
-.term-actions .wechat-btn.on { color: #07C160; }
-.wechat-dot { position: absolute; top: 1px; right: 1px; width: 6px; height: 6px; border-radius: 50%; background: #07C160; box-shadow: 0 0 0 1.5px var(--bg-2); }
-.wechat-dot.hidden { display: none; }
 
 /* 右键上下文菜单 */
 .context-menu {
@@ -1185,9 +1166,6 @@ kbd {
 .desktop.preview-maxed #topbar, .desktop.preview-maxed .brand { -webkit-app-region: no-drag; }
 
 /* 终端头：文件跟随按钮 */
-.term-actions #file-follow { font-size: 11px; padding: 3px 8px; font-family: var(--font-ui); }
-.term-actions #file-follow.on { color: var(--accent); background: var(--accent-soft); }
-.term-actions #term-max.on { color: var(--accent-ink); background: var(--accent); }
 .nav-buttons #btn-sidebar.on { color: var(--accent); border-color: var(--accent); }
 
 /* ---------- 换肤平滑过渡（消除硬切撕裂）---------- */
@@ -1203,8 +1181,6 @@ kbd {
 .desktop #sidebar { background-color: color-mix(in srgb, var(--panel) 80%, transparent); }
 
 /* 文件跟随：纯图标按钮（文字已撤） */
-.term-actions #file-follow { display: inline-flex; align-items: center; }
-.term-actions #file-follow svg { flex-shrink: 0; }
 
 /* ---------- 文件跟随：实时徽标 + 代码流动 + html 双缓冲 ---------- */
 .live-badge { display: inline-flex; align-items: center; gap: 5px; margin-right: 8px; padding: 1px 7px; border-radius: 99px; font-size: 10px; font-weight: 700; letter-spacing: 0.5px; color: var(--accent); background: var(--accent-soft); flex-shrink: 0; }
@@ -1420,5 +1396,5 @@ body { transition: background-color 0.28s ease, color 0.28s ease; }
 .rp-export:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 .rp-export:disabled { opacity: 0.5; cursor: default; }
 /* 回放入口发现点：有录像时按钮右上角一个小红点 */
-#term-replay { position: relative; }
-#term-replay.has-rec::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: #e5484d; }
+#term-more { position: relative; }
+#term-more.has-rec::after { content: ''; position: absolute; top: 3px; right: 3px; width: 5px; height: 5px; border-radius: 50%; background: #e5484d; }
