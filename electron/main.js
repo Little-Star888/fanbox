@@ -5,7 +5,7 @@
  * 复用零依赖后端 server.js（文件能力），叠加 node-pty 内嵌终端，
  * 让 TUI coding agent（Claude Code / Codex / Aider…）在界面里直接跑起来。
  */
-const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session, utilityProcess } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, nativeImage, Menu, clipboard, dialog, net, session, systemPreferences, utilityProcess } = require('electron');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
@@ -121,6 +121,33 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/.test(url)) { shell.openExternal(url); return { action: 'deny' }; }
     return { action: 'allow' };
+  });
+  // ↑ 只拦得住 window.open / target=_blank。md 正文里 marked 渲染出来的普通 <a href> 走的是
+  // 「当前页导航」，绕过它：整个界面被外站替换掉，而窗口是 hiddenInset 没有地址栏和后退键、
+  // 渲染层连同快捷键一起没了，等于死界面只能强退 app。这里按框架分两档兜住：
+  //   主框架——只准停在 app 自己的入口页（启动加载、⌘R 刷新），其余一律拦下；
+  //   子框架——html 文件预览的 iframe，跳本机文件随它去（出不了预览框），跳外站才拦。
+  // 自己人 = 后端（PORT）和 html 预览的隔离源（PORT+1，见 server.js 的 PREVIEW_PORT）
+  const isOurs = (url) => {
+    try {
+      const u = new URL(url);
+      return (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
+        && (u.port === String(PORT) || u.port === String(PORT + 1));
+    } catch { return false; } // about:blank、非法 URL 都按外部处理
+  };
+  win.webContents.on('will-frame-navigate', (ev) => {
+    const url = ev.url || '';
+    if (ev.isMainFrame) {
+      let atEntry = false;
+      try { const u = new URL(url); atEntry = isOurs(url) && u.port === String(PORT) && (u.pathname === '/' || u.pathname === ''); } catch { /* 非法 URL 直接拦 */ }
+      if (atEntry) return;
+    } else if (isOurs(url)) {
+      return;
+    }
+    ev.preventDefault();
+    // 外站交给系统浏览器；本机的（md 里 [x](./y.md) 这类相对链接会解析成 http://localhost:PORT/y.md）
+    // 只拦不开——扔进浏览器只会得到一个 404 页，更莫名其妙
+    if (!isOurs(url) && /^(https?|mailto|tel):/i.test(url)) shell.openExternal(url).catch(() => { /* 没有可处理的应用就算了 */ });
   });
 
   win.on('closed', () => { win = null; });
@@ -492,6 +519,73 @@ ipcMain.handle('power:setLid', async (e, { on } = {}) => {
   return { ...powerPayload(), ...r };
 });
 
+// ---------- 权限体检（macOS）----------
+// 终端里的 agent 要截屏、要控制别的 app，权限算在 FanBox 头上（TCC 的 responsible 就是本 app，
+// node-pty 起的 zsh 会正确继承）。但 TCC 的授权记录是按「服务 + bundle id + 代码签名要求」存的：
+// 换过签名证书之后（开发者账号升级、换 Team），旧记录的签名要求再也匹配不上当前 app，
+// 系统按「从未授权」处理 → 每次都弹窗。而系统设置里那一条仍然打着勾——它只读 auth_value，
+// 从不校验签名要求。于是「明明已经开了」和「每次都被拒」同时成立，肉眼无从分辨，
+// 更要命的是在设置里取关再勾回来只改 auth_value、改不动签名要求，怎么点都没用。
+// 这里主动把真实状态问出来，并给出唯一有效的那条出路：删掉记录重新授权。
+const PERM_SERVICES = ['ScreenCapture', 'Accessibility', 'AppleEvents'];
+function permStatus() {
+  return {
+    screen: systemPreferences.getMediaAccessStatus('screen') === 'granted',
+    a11y: systemPreferences.isTrustedAccessibilityClient(false), // false = 只查询，不弹系统提示
+  };
+}
+function checkPermissions() {
+  const s = permStatus();
+  const ok = (v) => (v ? M('✅ 已生效', '✅ working') : M('❌ 未生效', '❌ not working'));
+  const detail = [
+    `${M('屏幕录制', 'Screen Recording')}：${ok(s.screen)}`,
+    `${M('辅助功能', 'Accessibility')}：${ok(s.a11y)}`,
+  ].join('\n');
+  if (s.screen && s.a11y) {
+    dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+      type: 'info', message: M('权限正常', 'Permissions OK'), detail,
+    });
+    return;
+  }
+  const choice = dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+    type: 'warning',
+    buttons: [M('取消', 'Cancel'), M('清除记录并退出', 'Clear records and quit')],
+    defaultId: 1,
+    cancelId: 0,
+    message: M('有权限没生效', 'Some permissions are not working'),
+    detail: `${detail}\n\n` + M(
+      '如果「系统设置 → 隐私与安全性」里 FanBox 明明是打勾的，那是一条换签名后失效的旧记录。'
+      + '在设置里取关再勾回来改不动它——只能删掉记录重新授权。\n\n'
+      + '点「清除记录并退出」会清掉 FanBox 的授权记录并完全退出（屏幕录制权限对已运行的进程不生效，'
+      + '而点左上角红叉只是隐藏窗口、进程还活着，必须真退出）。重新打开后让 agent 再跑一次截屏，'
+      + '这次弹窗点允许，记录就会按当前签名重建。',
+      'If FanBox appears checked under System Settings → Privacy & Security, that is a stale record '
+      + 'left behind by a signing-certificate change. Toggling it there cannot fix it — the record has to be removed.\n\n'
+      + 'Clearing will remove FanBox\'s TCC records and quit completely (screen-recording permission never applies to '
+      + 'an already-running process, and the red close button only hides the window). Reopen, trigger a screenshot '
+      + 'again, and approve the prompt — the record will be rebuilt against the current signature.',
+    ),
+  });
+  if (choice !== 1) return;
+  const failed = [];
+  for (const svc of PERM_SERVICES) {
+    // 记录不存在时 tccutil 也返回成功，多清一个无害
+    try { require('child_process').execFileSync('/usr/bin/tccutil', ['reset', svc, 'com.huashu.fanbox'], { stdio: 'ignore' }); }
+    catch { failed.push(svc); }
+  }
+  if (failed.length) {
+    dialog.showMessageBoxSync(win && !win.isDestroyed() ? win : undefined, {
+      type: 'error', message: M('清除失败', 'Reset failed'),
+      detail: M(`这几项没能清掉：${failed.join('、')}\n手动跑一次：\n`, `Could not reset: ${failed.join(', ')}\nRun manually:\n`)
+        + failed.map((s2) => `tccutil reset ${s2} com.huashu.fanbox`).join('\n'),
+    });
+    return;
+  }
+  quitConfirmed = true; // 已经当面确认过一次了，别再问「还有终端在跑」
+  isQuitting = true;
+  app.quit();
+}
+
 // 原生菜单——关键是 Edit role，终端里的 ⌘C/⌘V 才生效
 function buildMenu() {
   const isMac = process.platform === 'darwin';
@@ -499,6 +593,7 @@ function buildMenu() {
     ...(isMac ? [{ label: 'FanBox', submenu: [
       { role: 'about', label: M('关于 FanBox', 'About FanBox') },
       { label: M('检查更新…', 'Check for Updates…'), click: () => checkUpdate({ manual: true }) },
+      { label: M('权限体检…', 'Check Permissions…'), click: () => checkPermissions() },
       { type: 'separator' },
       { role: 'hide', label: M('隐藏 FanBox', 'Hide FanBox') }, { role: 'hideOthers', label: M('隐藏其他', 'Hide Others') }, { role: 'unhide', label: M('全部显示', 'Show All') },
       { type: 'separator' },

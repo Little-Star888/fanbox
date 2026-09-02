@@ -38,6 +38,9 @@
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "终端里的 agent 需要通过它控制其他 app（截图、取窗口信息、驱动剪映等）。"
+      },
       "target": [
         {
           "target": "dmg"
