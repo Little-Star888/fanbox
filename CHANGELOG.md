@@ -11,6 +11,8 @@
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-09-04
+
 ### 新增
 - **应用内一键更新：后台下载、重启即换好**（#26）：右下角新版本胶囊上的按钮从「下载更新」变成「更新」——点一下，electron-updater 在后台拉当前架构的 zip（胶囊上显示百分比），下完按钮变「重启安装」，点了 Squirrel.Mac 原地换包并重新打开；没点的话下次退出 app 时也会自动装上。菜单「检查更新…」同样走这条路。2.4.1 起就是 Developer ID 签名加公证，签名校验早就过得了，这笔账拖了两个月。老 Release 没有 latest-mac.yml、或者这个 Release 没发当前架构的包（Intel 机器上 arm64 包不算）时，自动退回原来的「下载 dmg 到「下载」文件夹」；下载中途失败也退回那条路，不会卡住。本版本自己还得手动装一次，从下个版本起生效
 - **发版产物多了 zip、blockmap 和 latest-mac.yml**：electron-builder 的 mac target 加了 zip（自动更新读的是 zip 不是 dmg），`publish` 段只用来生成 app-update.yml / latest-mac.yml，`dist` 脚本带 `--publish never` 不在本机直传。发版向导的 `gh release create` 已把三样一起挂上；手动发版记得 dmg、zip、zip.blockmap、latest-mac.yml 四个都传，缺 yml 老版本就只能手动下 dmg
