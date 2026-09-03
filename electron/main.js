@@ -321,9 +321,11 @@ async function checkUpdate(opts) {
   updRetry = 0;
   const newer = cmpVer(info.tag, app.getVersion()) > 0;
   if (newer) {
-    pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url, auto: false };
     latestAssets = Array.isArray(info.assets) ? info.assets : null;
-    pendingUpdate.auto = await probeAutoUpdate();
+    // 探测完再落 pendingUpdate：渲染层启动时会主动 get() 一次，探测中途给它 auto:false 会先弹出 dmg 胶囊，
+    // 随后真正的推送因为「胶囊已存在」被跳过，用户就见不到「更新」按钮
+    const auto = await probeAutoUpdate();
+    pendingUpdate = { version: info.tag.replace(/^v/, ''), url: info.url, auto };
     if (win && !win.isDestroyed()) win.webContents.send('update:available', pendingUpdate);
   }
   if (manual) {
