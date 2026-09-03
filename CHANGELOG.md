@@ -11,6 +11,13 @@
 
 ## [Unreleased]
 
+### 新增
+- **`.jsonl` 按文本打开和编辑**（PR #46，@ajia1206）：Claude Code / Codex 的会话日志、各种 NDJSON 数据文件此前被当成未知二进制，只能看文件名。现在预览、编辑器 JSON 高亮、图标都按 JSON 处理，`/api/raw` 以 `application/x-ndjson` 提供
+- **Skills 透视识别「skill 合集仓库」**（PR #11，@Wenjunyun123）：superpowers 这类仓库根目录没有 SKILL.md、真正的 skill 在 `skills/*/SKILL.md` 下，之前整个仓库被标成「缺 SKILL.md——不是有效 skill」。现在会往下一层扫出里面的 skill，条目标签带上合集名；普通的缺 SKILL.md 目录照旧告警。注意 Claude Code 自己并不递归加载这类嵌套目录，这里只是把它们列出来
+
+### 变更
+- **删到废纸篓 / 用系统打开 / 在访达显示 / 系统终端打开，改为 `execFile` 传参数组**（PR #58，@anupamme）：原来是拼命令行字符串交给 shell，路径经 `shellQuote` 转义本身没有注入漏洞，但改成参数直传后不再依赖转义正确，semgrep 也不再报 `detect-child-process`。带单引号的文件名删除实测正常
+
 ## [2.15.2] - 2026-09-03
 
 ### 变更
