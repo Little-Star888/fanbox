@@ -12,6 +12,8 @@
 ## [Unreleased]
 
 ### 新增
+- **应用内一键更新：后台下载、重启即换好**（#26）：右下角新版本胶囊上的按钮从「下载更新」变成「更新」——点一下，electron-updater 在后台拉当前架构的 zip（胶囊上显示百分比），下完按钮变「重启安装」，点了 Squirrel.Mac 原地换包并重新打开；没点的话下次退出 app 时也会自动装上。菜单「检查更新…」同样走这条路。2.4.1 起就是 Developer ID 签名加公证，签名校验早就过得了，这笔账拖了两个月。老 Release 没有 latest-mac.yml、或者这个 Release 没发当前架构的包（Intel 机器上 arm64 包不算）时，自动退回原来的「下载 dmg 到「下载」文件夹」；下载中途失败也退回那条路，不会卡住。本版本自己还得手动装一次，从下个版本起生效
+- **发版产物多了 zip、blockmap 和 latest-mac.yml**：electron-builder 的 mac target 加了 zip（自动更新读的是 zip 不是 dmg），`publish` 段只用来生成 app-update.yml / latest-mac.yml，`dist` 脚本带 `--publish never` 不在本机直传。发版向导的 `gh release create` 已把三样一起挂上；手动发版记得 dmg、zip、zip.blockmap、latest-mac.yml 四个都传，缺 yml 老版本就只能手动下 dmg
 - **⌘K 里全文搜索改成一键开关**（PR #51，@jhoncao）：搜索框右侧多了「▤ 搜内容」胶囊，点一下或按 ⇧Tab 就切到全文搜索（含 PDF、截图 OCR），直接输关键词即可，不用再先敲「内容:」前缀；前缀写法仍然兼容。placeholder 和空态提示随模式切换
 - **⌘⇧M 一键铺满 / 还原终端**（PR #53，@jhoncao）：焦点在终端里敲 agent 时也响应；终端收着时按下先打开再铺满。只认 ⌘ 组合，Ctrl+Shift+M 留给终端里的 TUI。「…」菜单里的「终端铺满」项标上了快捷键
 - **`.jsonl` 按文本打开和编辑**（PR #46，@ajia1206）：Claude Code / Codex 的会话日志、各种 NDJSON 数据文件此前被当成未知二进制，只能看文件名。现在预览、编辑器 JSON 高亮、图标都按 JSON 处理，`/api/raw` 以 `application/x-ndjson` 提供

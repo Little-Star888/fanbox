@@ -663,7 +663,7 @@ async function releasePrepare(b) {
   if (b.doDist) steps.push('npm run dist');
   steps.push('git add -A', `git commit -m ${shellQuote(`v${version}: ${title || '发版'}`)}`);
   if (b.doPush) steps.push('git push');
-  if (b.doRelease) steps.push(`gh release create v${version} --title ${shellQuote(`v${version}${title ? ' · ' + title : ''}`)} --notes-file ${shellQuote(notesFile)}${b.doDist ? ` dist/*${version}*.dmg` : ''}`);
+  if (b.doRelease) steps.push(`gh release create v${version} --title ${shellQuote(`v${version}${title ? ' · ' + title : ''}`)} --notes-file ${shellQuote(notesFile)}${b.doDist ? ` dist/*${version}*.dmg dist/*${version}*.zip* dist/latest-mac.yml` : ''}`); // zip + blockmap + yml 是应用内自动更新（electron-updater）读的，缺一个老版本就只能手动下 dmg
   return { ok: true, cmd: steps.join(' && ') };
 }
 

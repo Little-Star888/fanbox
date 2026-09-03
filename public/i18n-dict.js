@@ -510,6 +510,9 @@ window.FANBOX_DICT = {
   // ---------- 更新提示 ----------
   '去下载': 'Download',
   '下载更新': 'Download update',
+  '更新': 'Update',
+  '重启安装': 'Restart to update',
+  '自动更新失败，改为下载安装包': 'Auto-update failed — downloading the installer instead',
   '发布页': 'Release page',
   '下载中…': 'Downloading…',
   '已下载并打开 dmg，拖进 Applications 完成更新': 'Downloaded — the dmg is open, drag it into Applications to finish',
@@ -678,4 +681,5 @@ window.FANBOX_DICT_RULES = [
   [/^上次 (.+) ✓$/, (m) => `last ${window.t ? window.t(m[1]) : m[1]} ✓`],
   [/^将执行于：(.+)$/, (m) => `Runs at: ${window.t ? window.t(m[1]) : m[1]}`],
   [/^下载中 (\d+)%$/, (m) => `Downloading ${m[1]}%`],
+  [/^v(.+) 已下载，重启即完成更新$/, (m) => `v${m[1]} downloaded — restart to finish`],
 ];

@@ -6138,39 +6138,67 @@ async function init() {
   maybeShowGuide();
   bindUpdateNotice();
 }
-// 新版本提示：主进程查到 GitHub 有新 Release 时右下角弹胶囊，引导去下载页（不强更不打扰）
+// 新版本提示：主进程查到 GitHub 有新 Release 时右下角弹胶囊（不强更不打扰）。
+// 三档：能自动装（Release 带 latest-mac.yml + 同架构 zip）→「更新」后台下载、下完「重启安装」；
+// 不能自动装但有 dmg →「下载更新」到 ~/Downloads 打开挂载；老 preload →「去下载」开发布页
 function bindUpdateNotice() {
   if (!window.fanboxUpdate) return;
-  const show = ({ version, url }) => {
-    if (localStorage.getItem('fb_skip_ver') === version || document.querySelector('.update-pill')) return;
+  const show = ({ version, url, auto, manual, start }) => {
+    if (!manual && localStorage.getItem('fb_skip_ver') === version) return;
+    const old = document.querySelector('.update-pill');
+    if (old) { if (!manual) return; old.remove(); } // 菜单「检查更新…」触发的要重画（可能已被 ✕ 掉）
     const bar = document.createElement('div');
     bar.className = 'update-pill';
+    const canAuto = !!auto && typeof window.fanboxUpdate.install === 'function';
     const canDl = typeof window.fanboxUpdate.download === 'function'; // 老 preload 没这桥，降级只留发布页
     bar.innerHTML = `<span class="up-msg">新版本 v${escapeHtml(version)} 已发布</span>`
-      + (canDl ? '<button class="up-go up-dl">下载更新</button><button class="up-page">发布页</button>' : '<button class="up-go">去下载</button>')
+      + (canAuto ? '<button class="up-go up-auto">更新</button><button class="up-page">发布页</button>'
+        : canDl ? '<button class="up-go up-dl">下载更新</button><button class="up-page">发布页</button>'
+          : '<button class="up-go">去下载</button>')
       + '<button class="up-x" title="这个版本不再提醒">✕</button>';
     document.body.appendChild(bar);
-    // #26 一键下载：主进程按当前架构下对应 dmg 到 ~/Downloads 并打开挂载，拖一下完成更新
+    const msg = bar.querySelector('.up-msg');
+    // 进度只喂给「正在下载」的那颗按钮（自动更新和 dmg 下载共用同一条推送）；胶囊撤掉时解绑
+    const off = window.fanboxUpdate.onProgress ? window.fanboxUpdate.onProgress((m) => {
+      const btn = bar.querySelector('.up-go:disabled');
+      if (m.state === 'downloading' && btn) btn.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
+    }) : null;
+    const dismiss = () => { if (off) off(); bar.remove(); };
+    const au = bar.querySelector('.up-auto');
+    if (au) {
+      // #26 全自动：主进程 electron-updater 下载，resolve 即可重启换包；不点「重启安装」，退出 app 时也会装上
+      au.onclick = async () => {
+        au.disabled = true; au.textContent = '下载中…';
+        const r = await window.fanboxUpdate.install().catch(() => ({ ok: false }));
+        if (r && r.ok) {
+          msg.textContent = `v${version} 已下载，重启即完成更新`;
+          au.disabled = false; au.textContent = '重启安装';
+          au.onclick = () => window.fanboxUpdate.restart();
+        } else {
+          // 自动更新走不通（网络断了、包没发全）就退回 dmg 那条路，别让人卡在这
+          toast('自动更新失败，改为下载安装包', true);
+          dismiss(); show({ version, url, auto: false, manual: true });
+        }
+      };
+      if (start) au.click();
+    }
     const dl = bar.querySelector('.up-dl');
     if (dl) {
+      // 一键下载：主进程按当前架构下对应 dmg 到 ~/Downloads 并打开挂载，拖一下完成更新
       dl.onclick = async () => {
         dl.disabled = true; dl.textContent = '下载中…';
         const r = await window.fanboxUpdate.download(version).catch(() => ({ ok: false }));
-        if (r && r.ok) { bar.querySelector('.up-msg').textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
+        if (r && r.ok) { msg.textContent = '已下载并打开 dmg，拖进 Applications 完成更新'; dl.remove(); }
         else {
           dl.disabled = false; dl.textContent = '下载更新';
           // no-asset：这个 Release 没发当前架构的 dmg，主进程已经把发布页开出来了
           toast(r && r.error === 'no-asset' ? `这个版本没有 ${r.arch} 安装包，已打开发布页` : '下载失败，去发布页手动下吧', true);
         }
       };
-      if (window.fanboxUpdate.onProgress) window.fanboxUpdate.onProgress((m) => {
-        if (m.state === 'downloading' && dl.disabled) dl.textContent = m.pct >= 0 ? `下载中 ${m.pct}%` : '下载中…';
-      });
-      bar.querySelector('.up-page').onclick = () => window.fanboxUpdate.open(url);
-    } else {
-      bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); bar.remove(); };
     }
-    bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); bar.remove(); };
+    if (au || dl) bar.querySelector('.up-page').onclick = () => window.fanboxUpdate.open(url);
+    else bar.querySelector('.up-go').onclick = () => { window.fanboxUpdate.open(url); dismiss(); };
+    bar.querySelector('.up-x').onclick = () => { localStorage.setItem('fb_skip_ver', version); dismiss(); };
   };
   window.fanboxUpdate.onAvailable(show);
   // 主进程启动 6 秒就推送，init 加载大目录时这里可能还没注册监听——补拉一次，错过的推送不丢
