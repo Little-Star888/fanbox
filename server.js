@@ -2178,6 +2178,20 @@ function skillFrontmatter(txt) {
   return { desc };
 }
 
+async function scanNestedSkillBundle(fp, source, label, out, disabled) {
+  const nestedRoot = path.join(fp, 'skills');
+  let nestedNames;
+  try { nestedNames = await fsp.readdir(nestedRoot, { withFileTypes: true }); } catch { return false; }
+  let hasSkills = false;
+  for (const x of nestedNames) {
+    if (!x.isDirectory() || x.name.startsWith('.')) continue;
+    try { await fsp.access(path.join(nestedRoot, x.name, 'SKILL.md')); hasSkills = true; break; } catch { /* not a skill */ }
+  }
+  if (!hasSkills) return false;
+  await scanSkillRoot(nestedRoot, source, `${label}/${path.basename(fp)}`, out, disabled);
+  return true;
+}
+
 async function scanSkillRoot(root, source, label, out, disabled = false) {
   let names;
   try { names = await fsp.readdir(root, { withFileTypes: true }); } catch { return; }
@@ -2221,6 +2235,7 @@ async function scanSkillRoot(root, source, label, out, disabled = false) {
         }
       }
     } catch {
+      if (await scanNestedSkillBundle(fp, source, label, out, disabled)) continue;
       item.residue = true;
       item.issues.push('缺 SKILL.md——不是有效 skill');
     }
