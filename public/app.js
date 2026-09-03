@@ -3093,7 +3093,7 @@ function bindEvents() {
   // 终端「…」：低频工具按当前状态给动词，菜单项自己说明会发生什么
   $('#term-more').onclick = (ev) => (ev.stopPropagation(), popupMenuAt(ev.currentTarget, [
     { label: follow.on ? '停止文件跟随' : '开启文件跟随', fn: () => setFileFollow(!follow.on) },
-    { label: term.maximized ? '还原终端' : '终端铺满', fn: () => term.toggleMax() },
+    { label: term.maximized ? '还原终端（⌘⇧M）' : '终端铺满（⌘⇧M）', fn: () => term.toggleMax() },
     { label: term.dock === 'bottom' ? '布局改为左右' : '布局改为上下', fn: () => term.setDock(term.dock === 'bottom' ? 'right' : 'bottom') },
     { label: state.muted ? '开启提示音' : '关闭提示音', fn: () => { state.muted = !state.muted; localStorage.setItem('fb_muted', state.muted ? '1' : '0'); if (!state.muted) playChime('tick'); } },
     { label: '终端录像', fn: () => player.open() },
@@ -3229,6 +3229,14 @@ function bindEvents() {
     const cmdkOpen = !$('#cmdk').classList.contains('hidden');
     const lbOpen = !!document.querySelector('.lightbox');
     if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); cmdkOpen ? cmdk.close() : cmdk.open(); return; }
+    // ⌘⇧M 终端铺满/还原（只认 ⌘，Ctrl 组合留给终端里的 TUI）；终端收着时先打开再铺满
+    if (e.metaKey && e.shiftKey && (e.key === 'm' || e.key === 'M')) {
+      if (!term.available()) return; // 浏览器版没有内嵌终端
+      e.preventDefault();
+      if ($('#terminal-panel').classList.contains('hidden')) { term.open(); term.toggleMax(true); }
+      else term.toggleMax();
+      return;
+    }
     if (cmdkOpen) {
       if (e.key === 'Escape') cmdk.close();
       else if (e.key === 'ArrowDown') { e.preventDefault(); cmdk.move(1); }
@@ -4066,6 +4074,7 @@ const term = {
         return false;
       }
       if (cmd && e.altKey && e.code === 'KeyL') return false; // ⌘⌥L 跳「下一个在等你的」：不给 xterm，冒泡到全局快捷键
+    if (cmd && e.shiftKey && e.code === 'KeyM') return false; // ⌘⇧M 终端铺满/还原：同上，冒泡到全局快捷键（PR #53）
       return true;
     });
 

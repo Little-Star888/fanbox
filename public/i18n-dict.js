@@ -374,6 +374,8 @@ window.FANBOX_DICT = {
   '停止文件跟随': 'Stop following files',
   '终端铺满': 'Maximize terminal',
   '还原终端': 'Restore terminal',
+  '终端铺满（⌘⇧M）': 'Maximize terminal (⌘⇧M)',
+  '还原终端（⌘⇧M）': 'Restore terminal (⌘⇧M)',
   '布局改为左右': 'Dock terminal to the right',
   '布局改为上下': 'Dock terminal to the bottom',
   '关闭提示音': 'Mute chime',

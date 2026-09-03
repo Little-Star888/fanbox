@@ -12,6 +12,8 @@
 ## [Unreleased]
 
 ### 新增
+- **⌘K 里全文搜索改成一键开关**（PR #51，@jhoncao）：搜索框右侧多了「▤ 搜内容」胶囊，点一下或按 ⇧Tab 就切到全文搜索（含 PDF、截图 OCR），直接输关键词即可，不用再先敲「内容:」前缀；前缀写法仍然兼容。placeholder 和空态提示随模式切换
+- **⌘⇧M 一键铺满 / 还原终端**（PR #53，@jhoncao）：焦点在终端里敲 agent 时也响应；终端收着时按下先打开再铺满。只认 ⌘ 组合，Ctrl+Shift+M 留给终端里的 TUI。「…」菜单里的「终端铺满」项标上了快捷键
 - **`.jsonl` 按文本打开和编辑**（PR #46，@ajia1206）：Claude Code / Codex 的会话日志、各种 NDJSON 数据文件此前被当成未知二进制，只能看文件名。现在预览、编辑器 JSON 高亮、图标都按 JSON 处理，`/api/raw` 以 `application/x-ndjson` 提供
 - **Skills 透视识别「skill 合集仓库」**（PR #11，@Wenjunyun123）：superpowers 这类仓库根目录没有 SKILL.md、真正的 skill 在 `skills/*/SKILL.md` 下，之前整个仓库被标成「缺 SKILL.md——不是有效 skill」。现在会往下一层扫出里面的 skill，条目标签带上合集名；普通的缺 SKILL.md 目录照旧告警。注意 Claude Code 自己并不递归加载这类嵌套目录，这里只是把它们列出来
 
